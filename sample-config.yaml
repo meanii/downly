@@ -1,0 +1,15 @@
+downly:
+
+  app_name: "downly"
+
+  # telegram api configs, get your own config by visiting http://my.telegram.org/
+  telegram:
+    api_id: ""
+    api_hash: ""
+    bot_token: ""
+
+  # downly bot configs
+  configs:
+    owner: "" # telegram bot owner userid
+    public: "true" # downly making enable for public use, false will make only for owner only
+    cobalt_base_url: "https://co.wuk.sh" # cobalt base url

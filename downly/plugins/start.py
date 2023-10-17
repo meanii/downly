@@ -1,11 +1,12 @@
-from pyrogram import Client, filters
+from pyrogram import filters
+from downly.downly import Downly
 
 
-@Client.on_message(filters=filters.command('start'))
-async def start(client, message):
+@Downly.on_message(filters.command(commands='start', prefixes='/'))
+async def start(_, message):
     # content
     start_message = (
-        f'hellow 🦉,   {client.get_me().first_name} here!\n\n'
-        'I am a simple bot that can help you to save what you love.\n'
+        f'hellow 🦉!\n\n'
+        'I am a bot that can help you to save what you love.\n'
     )
     await message.reply_text(start_message)
