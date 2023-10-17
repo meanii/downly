@@ -1,0 +1,6 @@
+services:
+  bot:
+    build: .
+    volumes:
+      - "./downloads:/app/downloads"
+      - "./config.yaml:/app/config.yaml"
