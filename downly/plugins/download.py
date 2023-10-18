@@ -3,15 +3,19 @@ import time
 from pyrogram import filters, Client
 from pyrogram.types import Message
 from downly.downly import Downly
+from downly import get_logger
 from downly.engine.cobalt import CobaltEngine
 from downly.utils.validator import validate_url
+from downly.utils.b_logger import b_logger
 from downly.engine.stream_downloader import StreamDownloader
 from pathlib import Path
 
+logger = get_logger(__name__)
+
 
 @Downly.on_message(filters.private, group=1)
+@b_logger
 async def download(client: Client, message: Message):
-
     # check if message is command then do nothing
     if message.command:
         return
@@ -30,14 +34,14 @@ async def download(client: Client, message: Message):
             'url': user_url_message,
         })
     except Exception as e:
-        print(f'Error while processing {user_url_message}\n'
-              f'error message: {e}')
+        logger.error(f'Error while processing {user_url_message}\n'
+                     f'error message: {e}')
         return await first_message.edit_text('Error!, please try again later\n'
                                              f'message: `{e}`')
 
     # logging output
-    print(f'handing request for {user_url_message} with output {output}\n'
-          f'from {message.from_user.first_name}({message.from_user.id})')
+    logger.info(f'handing request for {user_url_message} with output {output} - '
+                f'from {message.from_user.first_name}({message.from_user.id})')
 
     # handling output
     # handling stream, expect YouTube because of slow download
@@ -54,16 +58,16 @@ async def download(client: Client, message: Message):
         try:
             downloaded_file = await downloader.download()
         except Exception as e:
-            print(f'Error while downloading stream for {user_url_message}\n'
-                  f'error message: {e}')
+            logger.error(f'Error while downloading stream for {user_url_message} - '
+                         f'error message: {e}')
             return await first_message.edit_text('Error!, please try again later\n'
                                                  f'message: `{e}`')
 
         # progress callback
         async def progress(current, total):
-            print(
+            logger.info(
                 f'uploading for {message.from_user.first_name}({message.from_user.id}) '
-                f'{current * 100 / total:.1f}%'
+                f'{current * 100 / total:.1f}% '
                 f'input: {user_url_message}'
             )
 
@@ -81,6 +85,8 @@ async def download(client: Client, message: Message):
     if output.get('status') == 'redirect':
         await message.reply_video(video=output.get("url"), quote=True)
         await first_message.delete()
+        logger.info(f'finished handling request for {user_url_message} - '
+                    f'from {message.from_user.first_name}({message.from_user.id})')
         return
 
     if output.get('status') == 'error':

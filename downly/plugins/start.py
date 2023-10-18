@@ -1,8 +1,13 @@
 from pyrogram import filters
+from downly import get_logger
 from downly.downly import Downly
+from downly.utils.b_logger import b_logger
+
+logger = get_logger(__name__)
 
 
 @Downly.on_message(filters.command(commands='start', prefixes='/'))
+@b_logger
 async def start(_, message):
     # content
     start_message = (

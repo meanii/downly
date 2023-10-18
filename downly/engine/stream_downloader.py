@@ -1,6 +1,9 @@
 import httpx
+from downly import get_logger
 from downly.utils.fs_utils import make_sure_path_exists
 from pathlib import Path
+
+logger = get_logger(__name__)
 
 
 class StreamDownloader:
@@ -29,19 +32,19 @@ class StreamDownloader:
 
             with open(self.output_path, "wb") as file:
                 async for chunk in response.aiter_bytes():
-                    print(f"writing {len(chunk)} bytes to {self.output_path}")
+                    logger.debug(f"writing {len(chunk)} bytes to {self.output_path}")
 
                     # check if download slow less than 1kb/s
                     if len(chunk) < SLOW_DOWNLOAD_THRESHOLD:
                         SLOW_DOWNLOAD_TRIES -= 1
                         if SLOW_DOWNLOAD_TRIES == 0:
-                            print(f"downloading slow less than {SLOW_DOWNLOAD_THRESHOLD} bytes/s, so closing operation.")
+                            logger.error(f"downloading slow less than {SLOW_DOWNLOAD_THRESHOLD} bytes/s, so closing operation.")
                             await self.delete()
                             raise Exception(f"download slow less than {SLOW_DOWNLOAD_THRESHOLD} bytes/s, deleted file")
-                        print(f"downloading slow less than 1kb/s, {SLOW_DOWNLOAD_TRIES} tries left")
+                        logger.warning(f"downloading slow less than 1kb/s, {SLOW_DOWNLOAD_TRIES} tries left")
 
                     file.write(chunk)
-                print(f"finished writing {self.output_path}")
+                logger.info(f"finished writing {self.output_path}")
         await self.client.aclose()  # close client
         return self.output_path
 
@@ -51,4 +54,4 @@ class StreamDownloader:
         :return:
         """
         Path(self.output_path).unlink(missing_ok=True)
-        print(f"deleted {self.output_path}")
+        logger.info(f"deleted {self.output_path}")

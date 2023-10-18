@@ -1,5 +1,7 @@
-from downly import configs
+from downly import configs, get_logger
 import httpx
+
+logger = get_logger(__name__)
 
 
 def get_config(config: dict):
@@ -40,9 +42,9 @@ class CobaltEngine:
             CobaltEngine.MAX_RETRIES = 5  # reset
             return r
         except Exception as e:
-            print(f'Error while downloading {config.get("url")}\n')
+            logger.warning(f'Error while downloading {config.get("url")}\n')
             CobaltEngine.MAX_RETRIES -= 1
-            print(f'number of retries left: {CobaltEngine.MAX_RETRIES}\n')
+            logger.warning(f'number of retries left: {CobaltEngine.MAX_RETRIES}\n')
             if CobaltEngine.MAX_RETRIES == 0: # if no retries left
                 CobaltEngine.MAX_RETRIES = 5 # reset
                 raise Exception(e)

@@ -3,8 +3,10 @@ from datetime import datetime
 from pyrogram import Client
 from pyrogram import __version__
 from pyrogram.raw.all import layer
-from downly import telegram
+from downly import telegram, get_logger
 from pathlib import Path
+
+logger = get_logger(__name__)
 
 class Downly(Client):
     """
@@ -35,8 +37,8 @@ class Downly(Client):
         await super().start()
 
         me = await self.get_me()
-        print(f"Downly 🦉 v{__version__} (Layer {layer}) started on @{me.username}. Hi.")
+        logger.info(f"Downly 🦉 v{__version__} (Layer {layer}) started on @{me.username}. Hi.")
 
     async def stop(self, *args):
         await super().stop()
-        print("Downly 🦉 stopped. Bye.")
+        logger.info("Downly 🦉 stopped. Bye.")
