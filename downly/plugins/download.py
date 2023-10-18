@@ -13,18 +13,21 @@ from pathlib import Path
 logger = get_logger(__name__)
 
 
-@Downly.on_message(filters.private, group=1)
+@Downly.on_message(filters.private | filters.group, group=1)
 @b_logger
 async def download(client: Client, message: Message):
     # check if message is command then do nothing
     if message.command:
         return
 
+    if not message.text:
+        return
+
     user_url_message = message.text
 
     # validating valid url by urllib
     if not validate_url(user_url_message):
-        await message.reply_text('Invalid url!\nplease try again.')
+        logger.warning(f'invalid url {user_url_message}')
         return
 
     first_message = await message.reply_text('processing your request...', quote=True)
