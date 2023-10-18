@@ -8,8 +8,14 @@ from downly.utils.validator import validate_url
 from downly.engine.stream_downloader import StreamDownloader
 from pathlib import Path
 
-@Downly.on_message(filters.private)
+
+@Downly.on_message(filters.private, group=1)
 async def download(client: Client, message: Message):
+
+    # check if message is command then do nothing
+    if message.command:
+        return
+
     user_url_message = message.text
 
     # validating valid url by urllib
@@ -40,7 +46,8 @@ async def download(client: Client, message: Message):
         # handling stream
         downloader = StreamDownloader(
             url=output.get('url'),
-            output_path=str(Path.cwd() / 'downloads' / 'stream' / f'{message.from_user.id}' / f'{time.time():.0f}' / '[STREAM_FILENAME]')
+            output_path=str(
+                Path.cwd() / 'downloads' / 'stream' / f'{message.from_user.id}' / f'{time.time():.0f}' / '[STREAM_FILENAME]')
         )
 
         # downloading stream
@@ -50,7 +57,7 @@ async def download(client: Client, message: Message):
             print(f'Error while downloading stream for {user_url_message}\n'
                   f'error message: {e}')
             return await first_message.edit_text('Error!, please try again later\n'
-                                            f'message: `{e}`')
+                                                 f'message: `{e}`')
 
         # progress callback
         async def progress(current, total):
@@ -78,6 +85,6 @@ async def download(client: Client, message: Message):
 
     if output.get('status') == 'error':
         return first_message.edit_text('Error!, please try again later'
-                                  f'message: `{output.get("text")}`')
+                                       f'message: `{output.get("text")}`')
 
     await first_message.edit_text('Error!, please try again later')
