@@ -17,16 +17,24 @@ async def download(client: Client, message: Message):
         await message.reply_text('Invalid url!\nplease try again.')
         return
 
-    output = CobaltEngine().download({
-        'url': user_url_message,
-    })
+    first_message = await message.reply_text('processing your request...', quote=True)
+
+    try:
+        output = CobaltEngine().download({
+            'url': user_url_message,
+        })
+    except Exception as e:
+        print(f'Error while processing {user_url_message}\n'
+              f'error message: {e}')
+        return await first_message.edit_text('Error!, please try again later\n'
+                                             f'message: `{e}`')
 
     # logging output
     print(f'handing request for {user_url_message} with output {output}\n'
           f'from {message.from_user.first_name}({message.from_user.id})')
 
     # handling output
-    # handling stream, expect youtube because of slow download
+    # handling stream, expect YouTube because of slow download
     if output.get('status') == 'stream':
 
         # handling stream
@@ -41,7 +49,7 @@ async def download(client: Client, message: Message):
         except Exception as e:
             print(f'Error while downloading stream for {user_url_message}\n'
                   f'error message: {e}')
-            return await message.reply_text('Error!, please try again later\n'
+            return await first_message.edit_text('Error!, please try again later\n'
                                             f'message: `{e}`')
 
         # progress callback
@@ -64,12 +72,12 @@ async def download(client: Client, message: Message):
         return
 
     if output.get('status') == 'redirect':
-        await message.reply_text('Your request is being processed')
-        await client.send_video(video=output.get("url"), chat_id=message.chat.id)
+        await message.reply_video(video=output.get("url"), quote=True)
+        await first_message.delete()
         return
 
     if output.get('status') == 'error':
-        return message.reply_text('Error!, please try again later'
+        return first_message.edit_text('Error!, please try again later'
                                   f'message: `{output.get("text")}`')
 
-    await message.reply_text('Error!, please try again later')
+    await first_message.edit_text('Error!, please try again later')
