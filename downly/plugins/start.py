@@ -7,6 +7,9 @@ async def start(_, message):
     # content
     start_message = (
         f'hellow 🦉!\n\n'
-        'I am a bot that can help you to save what you love.\n'
+        'downly is a simple telegram bot that can download files from the internet and upload them to telegram.\n'
+        'downly uses [wukko/cobalt](https://github.com/wukko/cobalt/) to download files. downly is written in python using pyrogram.\n\n'
+        'If you have any suggestions, please contact @aniicrite. and if you want to get updates about bot, join @spookyanii.\n\n'
+        '- If you want to see the source code, visit [meanii/downly](https://github.com/meanii/downly).'
     )
-    await message.reply_text(start_message)
+    await message.reply_text(start_message, disable_web_page_preview=True)
