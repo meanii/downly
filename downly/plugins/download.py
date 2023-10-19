@@ -5,9 +5,9 @@ from pyrogram.types import Message
 from downly.downly import Downly
 from downly import get_logger
 from downly.engine.cobalt import CobaltEngine
-from downly.utils.validator import validate_url
+from downly.utils.validator import validate_url, is_supported_service
 from downly.utils.b_logger import b_logger
-from downly.engine.stream_downloader import StreamDownloader
+from downly.handlers.stream_downloader import StreamDownloader
 from pathlib import Path
 
 logger = get_logger(__name__)
@@ -24,6 +24,11 @@ async def download(client: Client, message: Message):
         return
 
     user_url_message = message.text
+
+    # check if user is from available service
+    if not is_supported_service(user_url_message):
+        logger.warning(f'unsupported service {user_url_message}')
+        return
 
     # validating valid url by urllib
     if not validate_url(user_url_message):
