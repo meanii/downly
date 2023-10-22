@@ -2,3 +2,4 @@ pyrogram
 tgcrypto
 pyyaml
 httpx
+yt-dlp==2023.7.6
