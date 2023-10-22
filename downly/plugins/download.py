@@ -79,6 +79,7 @@ async def download(client: Client, message: Message):
 
         # downloading stream
         try:
+            first_message = await first_message.edit_text('downloading stream...')
             downloaded_file = await downloader.download()
         except Exception as e:
             logger.error(f'Error while downloading stream for {user_url_message} - '
@@ -92,6 +93,9 @@ async def download(client: Client, message: Message):
                 f'uploading for {message.from_user.first_name}({message.from_user.id}) '
                 f'{current * 100 / total:.1f}% '
                 f'input: {user_url_message}'
+            )
+            await first_message.edit_text(
+                f'uploading {current * 100 / total:.1f}%\nPlease have patience...'
             )
 
         # sending video
