@@ -10,6 +10,8 @@ from downly.utils.b_logger import b_logger
 from downly.handlers.stream_downloader import StreamDownloader
 from downly.handlers.youtube_downloader import YoutubeDownloader
 from pathlib import Path
+from urllib.parse import urlparse
+
 
 logger = get_logger(__name__)
 
@@ -59,9 +61,10 @@ async def download(client: Client, message: Message):
         output_dir = Path.resolve(
             Path.cwd() / 'downloads' / 'stream' / f'{message.from_user.id}' / f'{time.time():.0f}')
 
-        # handle YouTube stream
+        domain = urlparse(user_url_message).hostname.replace('www.', '')
 
-        if 'youtube' in user_url_message:
+        # handle YouTube stream
+        if domain in ['youtube.com', 'youtu.be']:
             downloader = YoutubeDownloader(
                 youtube_url=user_url_message,
                 output_dir=output_dir
