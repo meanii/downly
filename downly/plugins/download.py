@@ -8,6 +8,7 @@ from downly.engine.cobalt import CobaltEngine
 from downly.utils.validator import validate_url, is_supported_service
 from downly.utils.b_logger import b_logger
 from downly.handlers.stream_downloader import StreamDownloader
+from downly.handlers.youtube_downloader import YoutubeDownloader
 from pathlib import Path
 
 logger = get_logger(__name__)
@@ -55,16 +56,28 @@ async def download(client: Client, message: Message):
     # handling stream, expect YouTube because of slow download
     if output.get('status') == 'stream':
 
-        # handling stream
-        downloader = StreamDownloader(
-            url=output.get('url'),
-            output_path=str(
-                Path.cwd() / 'downloads' / 'stream' / f'{message.from_user.id}' / f'{time.time():.0f}' / '[STREAM_FILENAME]')
-        )
+        output_dir = Path.resolve(
+            Path.cwd() / 'downloads' / 'stream' / f'{message.from_user.id}' / f'{time.time():.0f}')
+
+        # handle YouTube stream
+
+        if 'youtube' in user_url_message:
+            downloader = YoutubeDownloader(
+                youtube_url=user_url_message,
+                output_dir=output_dir
+            )
+        else:
+            # handling stream
+            downloader = StreamDownloader(
+                url=output.get('url'),
+                output_path=str(
+                    Path.resolve(output_dir / '[STREAM_FILENAME]'))
+            )
 
         # downloading stream
         try:
             downloaded_file = await downloader.download()
+            print(f"\n\n\n\n{downloaded_file} downlaoaded file url\n\n\n\n")
         except Exception as e:
             logger.error(f'Error while downloading stream for {user_url_message} - '
                          f'error message: {e}')
@@ -80,14 +93,15 @@ async def download(client: Client, message: Message):
             )
 
         # sending video
-        await client.send_video(
+        await message.reply_video(
             video=downloaded_file,
-            chat_id=message.chat.id,
             supports_streaming=True,
-            progress=progress)
+            progress=progress,
+            quote=True)
 
         # delete downloaded file
         await downloader.delete()
+        await first_message.delete()
         return
 
     if output.get('status') == 'redirect':
