@@ -77,7 +77,6 @@ async def download(client: Client, message: Message):
         # downloading stream
         try:
             downloaded_file = await downloader.download()
-            print(f"\n\n\n\n{downloaded_file} downlaoaded file url\n\n\n\n")
         except Exception as e:
             logger.error(f'Error while downloading stream for {user_url_message} - '
                          f'error message: {e}')
