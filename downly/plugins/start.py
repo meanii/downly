@@ -11,10 +11,22 @@ logger = get_logger(__name__)
 async def start(_, message):
     # content
     start_message = (
-        f'hellow 🦉!\n\n'
-        'downly is a simple telegram bot that can download files from the internet and upload them to telegram.\n'
-        'downly uses [wukko/cobalt](https://github.com/wukko/cobalt/) to download files. downly is written in python using pyrogram.\n\n'
-        'If you have any suggestions, please contact @aniicrite. and if you want to get updates about bot, join @spookyanii.\n\n'
-        '- If you want to see the source code, visit [meanii/downly](https://github.com/meanii/downly).'
+        'Hello! I am Downly, a simple Telegram bot that can download files from the internet and upload them to '
+        'Telegram.\n\n'
+        'To use me, simply send me a link to the file you want to download, and I will take care of the rest. I can '
+        'download files of any size, and I support a variety of services, including:\n\n'
+        '• YouTube and Youtube Shots\n'
+        '• Twitter\n'
+        '• Instagram Post, Stories and Reels\n'
+        '• Vimeo\n'
+        '• SoundCloud\n'
+        '• Bandcamp\n'
+        '• Twitch\n'
+        '• DailyMotion\n'
+        '• TikTok\n'
+        '• And many more!\n\n'
+        'If you have any questions or suggestions, please feel free to contact me at @aniicrite. For updates about '
+        'the bot, join @spookyanii.\n\n'
+
     )
     await message.reply_text(start_message, disable_web_page_preview=True)
