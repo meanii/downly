@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 logger = get_logger(__name__)
 
 
-@Downly.on_message(filters.private | filters.group, group=1)
+@Downly.on_message(filters.private | filters.group | filters.channel, group=1)
 @b_logger
 async def download(client: Client, message: Message):
     # check if message is command then do nothing
@@ -28,14 +28,13 @@ async def download(client: Client, message: Message):
 
     user_url_message = message.text
 
+    # validating valid url by urllib
+    if not validate_url(user_url_message):
+        return
+
     # check if user is from available service
     if not is_supported_service(user_url_message):
         logger.warning(f'unsupported service {user_url_message}')
-        return
-
-    # validating valid url by urllib
-    if not validate_url(user_url_message):
-        logger.warning(f'invalid url {user_url_message}')
         return
 
     first_message = await message.reply_text('processing your request...', quote=True)
@@ -55,6 +54,12 @@ async def download(client: Client, message: Message):
                 f'from {message.from_user.first_name}({message.from_user.id})')
 
     # handling output
+
+    # handling error message
+    if output.get('status') == 'error':
+        return first_message.edit_text('Error!, please try again later'
+                                       f'message: `{output.get("text")}`')
+
     # handling stream, expect YouTube because of slow download
     if output.get('status') == 'stream':
 
@@ -116,9 +121,5 @@ async def download(client: Client, message: Message):
         logger.info(f'finished handling request for {user_url_message} - '
                     f'from {message.from_user.first_name}({message.from_user.id})')
         return
-
-    if output.get('status') == 'error':
-        return first_message.edit_text('Error!, please try again later'
-                                       f'message: `{output.get("text")}`')
 
     await first_message.edit_text('Error!, please try again later')
