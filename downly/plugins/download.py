@@ -7,6 +7,7 @@ from downly import get_logger
 from downly.engine.cobalt import CobaltEngine
 from downly.utils.validator import validate_url, is_supported_service
 from downly.utils.b_logger import b_logger
+from downly.utils.message import get_chat_info
 from downly.handlers.stream_downloader import StreamDownloader
 from downly.handlers.youtube_downloader import YoutubeDownloader
 from pathlib import Path
@@ -27,6 +28,9 @@ async def download(client: Client, message: Message):
         return
 
     user_url_message = message.text
+
+    # get chat info if message is from group or channel
+    title, id = get_chat_info(message)
 
     # validating valid url by urllib
     if not validate_url(user_url_message):
@@ -51,7 +55,7 @@ async def download(client: Client, message: Message):
 
     # logging output
     logger.info(f'handing request for {user_url_message} with output {output} - '
-                f'from {message.from_user.first_name}({message.from_user.id})')
+                f'from {title}({id})')
 
     # handling output
 
@@ -64,7 +68,7 @@ async def download(client: Client, message: Message):
     if output.get('status') == 'stream':
 
         output_dir = Path.resolve(
-            Path.cwd() / 'downloads' / 'stream' / f'{message.from_user.id}' / f'{time.time():.0f}')
+            Path.cwd() / 'downloads' / 'stream' / f'{id}' / f'{time.time():.0f}')
 
         domain = urlparse(user_url_message).hostname.replace('www.', '')
 
@@ -95,7 +99,7 @@ async def download(client: Client, message: Message):
         # progress callback
         async def progress(current, total):
             logger.info(
-                f'uploading for {message.from_user.first_name}({message.from_user.id}) '
+                f'uploading for {title}({id}) '
                 f'{current * 100 / total:.1f}% '
                 f'input: {user_url_message}'
             )
@@ -119,7 +123,7 @@ async def download(client: Client, message: Message):
         await message.reply_video(video=output.get("url"), quote=True)
         await first_message.delete()
         logger.info(f'finished handling request for {user_url_message} - '
-                    f'from {message.from_user.first_name}({message.from_user.id})')
+                    f'from {title}({id})')
         return
 
     await first_message.edit_text('Error!, please try again later')
