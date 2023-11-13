@@ -103,6 +103,10 @@ async def download(client: Client, message: Message):
                 f'{current * 100 / total:.1f}% '
                 f'input: {user_url_message}'
             )
+
+            # if channel, then dont edit message
+            if message.chat.type == 'channel':
+                return
             await first_message.edit_text(
                 f'uploading {current * 100 / total:.1f}%\nPlease have patience...'
             )

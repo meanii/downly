@@ -6,6 +6,8 @@ from pyrogram.raw.all import layer
 from downly import telegram, get_logger
 from pathlib import Path
 
+from downly.utils.bot_info import bot
+
 logger = get_logger(__name__)
 
 class Downly(Client):
@@ -37,6 +39,8 @@ class Downly(Client):
         await super().start()
 
         me = await self.get_me()
+        bot.username = me.username
+        bot.id = me.id
         logger.info(f"Downly 🦉 v{__version__} (Layer {layer}) started on @{me.username}. Hi.")
 
     async def stop(self, *args):
