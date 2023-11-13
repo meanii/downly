@@ -15,5 +15,5 @@ async def logger(client: Client, message: Message):
     if message.chat.type == ChatType.GROUP or message.chat.type == ChatType.SUPERGROUP:
         update_chat(str(message.chat.id), message.chat.title)
 
-    if message.chat.type == ChatType.PRIVATE:
+    if message.from_user:
         update_user(message.from_user.id, message.from_user.username)
