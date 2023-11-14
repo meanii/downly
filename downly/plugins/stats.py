@@ -17,6 +17,7 @@ async def stats(_, message):
         return
 
     stats_message = (
-        f'We\'ve got a total of `{count_users()}` users across `{count_chats()}` chats, and the download count is `NOT_AVAILABLE_RN`.'
+        f'We\'ve got a total of `{count_users()}` users across `{count_chats()}` chats, '
+        f'and the download count is `NOT_AVAILABLE_RN`.'
     )
     await message.reply_text(stats_message, disable_web_page_preview=True)
