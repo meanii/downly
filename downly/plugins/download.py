@@ -19,7 +19,6 @@ from downly.utils.send_video import send_video
 from downly.handlers.stream_downloader import StreamDownloader
 from downly.handlers.youtube_downloader import YoutubeDownloader
 
-from downly.database.downloads_sql import add_download
 
 logger = get_logger(__name__)
 
@@ -27,7 +26,7 @@ logger = get_logger(__name__)
 @Downly.on_message(filters.private | filters.group | filters.channel, group=1)
 @b_logger
 async def download(client: Client, message: Message):
-    # check if message is command then do nothing
+    # check if a message is command then do nothing
     if message.command:
         return
 
@@ -55,10 +54,15 @@ async def download(client: Client, message: Message):
             'url': user_url_message,
         })
     except Exception as e:
-        logger.error(f'Error while processing {user_url_message}\n'
-                     f'error message: {e}')
-        return await first_message.edit_text('Error!, please try again later\n'
-                                             f'message: `{e}`')
+        logger.error(f'Error occurred while processing {user_url_message}\n'
+                     f'Error message: {e}')
+
+        error_message = (
+            'Oops! Something went wrong.\n'
+            'Please try again later.\n'
+            f'Details: `{e}`'
+        )
+        return await first_message.edit_text(error_message)
 
     # logging output
     logger.info(f'handing request for {user_url_message} with output {output} - '
@@ -68,8 +72,12 @@ async def download(client: Client, message: Message):
 
     # handling error message
     if output.get('status') == 'error':
-        return first_message.edit_text('Error!, please try again later'
-                                       f'message: `{output.get("text")}`')
+        error_message = (
+            'Apologies, an error occurred.\n'
+            'Please attempt your request later.\n'
+            f'Message details: `{output.get("text")}`'
+        )
+        return await first_message.edit_text(error_message)
 
     # handling stream, expect YouTube because of slow download
     if output.get('status') == 'stream':
@@ -135,4 +143,6 @@ async def download(client: Client, message: Message):
                     f'from {title}({id})')
         return
 
-    await first_message.edit_text('Error!, please try again later')
+    error_message = 'An error occurred. Please try again later.'
+    return await first_message.edit_text(error_message)
+
