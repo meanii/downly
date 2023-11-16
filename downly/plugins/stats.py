@@ -4,6 +4,7 @@ from downly.downly import Downly
 from downly.utils.b_logger import b_logger
 
 from downly.database.users_sql import count_users, count_chats
+from downly.database.downloads_sql import count_downloads
 
 logger = get_logger(__name__)
 
@@ -18,6 +19,6 @@ async def stats(_, message):
 
     stats_message = (
         f'We\'ve got a total of `{count_users()}` users across `{count_chats()}` chats, '
-        f'and the download count is `NOT_AVAILABLE_RN`.'
+        f'and the total download count is `{count_downloads()}`.'
     )
     await message.reply_text(stats_message, disable_web_page_preview=True)

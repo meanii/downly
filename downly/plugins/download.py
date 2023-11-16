@@ -1,18 +1,25 @@
 import time
 
-from pyrogram import filters, Client
-from pyrogram.types import Message
-from downly.downly import Downly
-from downly import get_logger
-from downly.engine.cobalt import CobaltEngine
-from downly.utils.validator import validate_url, is_supported_service
-from downly.utils.b_logger import b_logger
-from downly.utils.message import get_chat_info
-from downly.handlers.stream_downloader import StreamDownloader
-from downly.handlers.youtube_downloader import YoutubeDownloader
 from pathlib import Path
 from urllib.parse import urlparse
 
+from pyrogram import filters, Client
+from pyrogram.types import Message
+
+from downly import get_logger
+from downly.downly import Downly
+
+from downly.engine.cobalt import CobaltEngine
+
+from downly.utils.validator import validate_url, is_supported_service
+from downly.utils.b_logger import b_logger
+from downly.utils.message import get_chat_info
+from downly.utils.send_video import send_video
+
+from downly.handlers.stream_downloader import StreamDownloader
+from downly.handlers.youtube_downloader import YoutubeDownloader
+
+from downly.database.downloads_sql import add_download
 
 logger = get_logger(__name__)
 
@@ -29,7 +36,7 @@ async def download(client: Client, message: Message):
 
     user_url_message = message.text
 
-    # get chat info if message is from group or channel
+    # get chat info if a message is from a group or channel
     title, id = get_chat_info(message)
 
     # validating valid url by urllib
@@ -112,11 +119,7 @@ async def download(client: Client, message: Message):
             )
 
         # sending video
-        await message.reply_video(
-            video=downloaded_file,
-            supports_streaming=True,
-            progress=progress,
-            quote=True)
+        await send_video(message=message, video=downloaded_file, progress=progress)
 
         # delete downloaded file
         await downloader.delete()
@@ -124,7 +127,9 @@ async def download(client: Client, message: Message):
         return
 
     if output.get('status') == 'redirect':
-        await message.reply_video(video=output.get("url"), quote=True)
+        # sending video
+        await send_video(message=message, video=output.get("url"))
+
         await first_message.delete()
         logger.info(f'finished handling request for {user_url_message} - '
                     f'from {title}({id})')
