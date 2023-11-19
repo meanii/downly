@@ -38,10 +38,13 @@ class StreamDownloader:
                     if len(chunk) < SLOW_DOWNLOAD_THRESHOLD:
                         SLOW_DOWNLOAD_TRIES -= 1
                         if SLOW_DOWNLOAD_TRIES == 0:
-                            logger.error(f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} bytes/s. The associated file has been removed.")
+                            logger.error(f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} "
+                                         f"bytes/s. The associated file has been removed.")
                             await self.delete()
-                            raise Exception(f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} bytes/s. The associated file has been removed.")
-                        logger.warning(f"The download speed is slow, less than 1kb/s. {SLOW_DOWNLOAD_TRIES} attempts remaining.")
+                            raise Exception(f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} "
+                                            f"bytes/s. The associated file has been removed.")
+                        logger.warning(f"The download speed is slow, less than 1kb/s. {SLOW_DOWNLOAD_TRIES} attempts "
+                                       f"remaining.")
 
                     file.write(chunk)
                 logger.info(f"finished writing {self.output_path}")
