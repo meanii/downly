@@ -9,8 +9,8 @@ services:
   postgres:
       image: postgres:13.3-alpine
       environment:
-          POSTGRES_USER: meanii
-          POSTGRES_PASSWORD: meanii
+          POSTGRES_USER: downly
+          POSTGRES_PASSWORD: downly
           POSTGRES_DB: downly
       volumes:
           - "./postgres-data:/var/lib/postgresql/data"
