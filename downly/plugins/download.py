@@ -15,10 +15,10 @@ from downly.utils.validator import validate_url, is_supported_service
 from downly.utils.b_logger import b_logger
 from downly.utils.message import get_chat_info
 from downly.utils.send_video import send_video
+from downly.utils.progress import Progress
 
 from downly.handlers.stream_downloader import StreamDownloader
 from downly.handlers.youtube_downloader import YoutubeDownloader
-
 
 logger = get_logger(__name__)
 
@@ -48,6 +48,43 @@ async def download(client: Client, message: Message):
         return
 
     first_message = await message.reply_text('processing your request...', quote=True)
+    domain = urlparse(user_url_message).hostname.replace('www.', '')
+
+    # handling YouTube first
+    output_dir = Path.resolve(
+        Path.cwd() / 'downloads' / 'stream' / f'{id}' / f'{time.time():.0f}')
+
+    async def download_stream(user_message: Message, downloader_instance):
+        """ Download stream from YouTube and Cobalt Engine """
+        # downloading stream
+        try:
+            user_message = await user_message.edit_text('downloading stream...')
+            downloaded_file = await downloader_instance.download()
+        except Exception as e:
+            logger.error(f'Error while downloading stream for {user_url_message} - '
+                         f'error message: {e}')
+            return await user_message.edit_text('Error!, please try again later\n'
+                                                f'message: `{e}`')
+
+        # progress callback
+        progress = Progress(message=user_message)
+
+        # sending video
+        await send_video(message=message, video=downloaded_file, progress=progress.progress)
+
+        # delete downloaded file
+        await downloader.delete()
+        await user_message.delete()
+        return
+
+    # handle YouTube stream
+    if domain in ['youtube.com', 'youtu.be']:
+        downloader = YoutubeDownloader(
+            youtube_url=user_url_message,
+            output_dir=output_dir
+        )
+        await download_stream(first_message, downloader)
+        return
 
     try:
         output = CobaltEngine().download({
@@ -81,57 +118,15 @@ async def download(client: Client, message: Message):
 
     # handling stream, expect YouTube because of slow download
     if output.get('status') == 'stream':
-
-        output_dir = Path.resolve(
-            Path.cwd() / 'downloads' / 'stream' / f'{id}' / f'{time.time():.0f}')
-
-        domain = urlparse(user_url_message).hostname.replace('www.', '')
-
-        # handle YouTube stream
-        if domain in ['youtube.com', 'youtu.be']:
-            downloader = YoutubeDownloader(
-                youtube_url=user_url_message,
-                output_dir=output_dir
-            )
-        else:
-            # handling stream
-            downloader = StreamDownloader(
-                url=output.get('url'),
-                output_path=str(
-                    Path.resolve(output_dir / '[STREAM_FILENAME]'))
-            )
+        # handling stream
+        downloader = StreamDownloader(
+            url=output.get('url'),
+            output_path=str(
+                Path.resolve(output_dir / '[STREAM_FILENAME]'))
+        )
 
         # downloading stream
-        try:
-            first_message = await first_message.edit_text('downloading stream...')
-            downloaded_file = await downloader.download()
-        except Exception as e:
-            logger.error(f'Error while downloading stream for {user_url_message} - '
-                         f'error message: {e}')
-            return await first_message.edit_text('Error!, please try again later\n'
-                                                 f'message: `{e}`')
-
-        # progress callback
-        async def progress(current, total):
-            logger.info(
-                f'uploading for {title}({id}) '
-                f'{current * 100 / total:.1f}% '
-                f'input: {user_url_message}'
-            )
-
-            # if channel, then dont edit message
-            if message.chat.type == 'channel':
-                return
-            await first_message.edit_text(
-                f'uploading {current * 100 / total:.1f}%\nPlease have patience...'
-            )
-
-        # sending video
-        await send_video(message=message, video=downloaded_file, progress=progress)
-
-        # delete downloaded file
-        await downloader.delete()
-        await first_message.delete()
+        await download_stream(first_message, downloader)
         return
 
     if output.get('status') == 'redirect':
@@ -145,4 +140,3 @@ async def download(client: Client, message: Message):
 
     error_message = 'An error occurred. Please try again later.'
     return await first_message.edit_text(error_message)
-
