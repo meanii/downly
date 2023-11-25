@@ -61,10 +61,13 @@ async def download(client: Client, message: Message):
             user_message = await user_message.edit_text('downloading stream...')
             downloaded_file = await downloader_instance.download()
         except Exception as e:
-            logger.error(f'Error while downloading stream for {user_url_message} - '
-                         f'error message: {e}')
-            return await user_message.edit_text('Error!, please try again later\n'
-                                                f'message: `{e}`')
+            error = (
+                'Oops! Something went wrong.\n'
+                'Please try again later.\n'
+                f'Details: `{e}`'
+            )
+            logger.error(error)
+            return await user_message.edit_text(error)
 
         # progress callback
         progress = Progress(message=user_message)
