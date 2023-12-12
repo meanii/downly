@@ -1,3 +1,4 @@
+import redis
 import logging.config
 
 from pathlib import Path
@@ -12,6 +13,17 @@ database_configs = config.get('downly').get('database')  # database configs, pos
 
 # logging configs
 logging.config.fileConfig(fname='logger.conf', disable_existing_loggers=False)
+
+# connecting to redis 
+redis_host = database_configs.get('redis').get('host', 'localhost')
+redis_port = int(database_configs.get('redis').get('port', 6379))
+
+r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+try:
+    r.ping()
+    logging.info('Redis server is running')
+except redis.exceptions.ConnectionError:
+    raise Exception('Redis server is not running')
 
 
 def get_logger(name: str):

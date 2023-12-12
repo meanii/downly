@@ -20,6 +20,8 @@ from downly.utils.progress import Progress
 from downly.handlers.stream_downloader import StreamDownloader
 from downly.handlers.youtube_downloader import YoutubeDownloader
 
+from downly.queue import rqueue
+
 logger = get_logger(__name__)
 
 
@@ -86,7 +88,21 @@ async def download(client: Client, message: Message):
             youtube_url=user_url_message,
             output_dir=output_dir
         )
-        await download_stream(first_message, downloader)
+
+        queue_id = rqueue.add({
+            'url': user_url_message,
+            'chat_id': id,
+            'message_id': first_message.id,
+            'output_dir': str(output_dir),
+        })
+
+        await first_message.edit_text(
+            f'Your request is in queue.\n'
+            f'Queue ID: `{queue_id}`\n\n'
+            f'You can check your request status by using `/status {queue_id}`'
+        )
+
+        # await download_stream(first_message, downloader)
         return
 
     try:
