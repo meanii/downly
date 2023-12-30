@@ -1,7 +1,7 @@
 defmodule DownlyWorker.Application do
-  # See https://hexdocs.pm/elixir/Application.html
-  # for more information on OTP Applications
-  @moduledoc false
+  @moduledoc """
+  DownlyWorker is a Telegram bot that downloads files from the Internet.
+  """
 
   use Application
 
@@ -22,8 +22,6 @@ defmodule DownlyWorker.Application do
       {DownlyWorker.Server, []}
     ]
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
     opts = [strategy: :one_for_one, name: DownlyWorker.Supervisor]
     Supervisor.start_link(children, opts)
   end

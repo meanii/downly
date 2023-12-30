@@ -10,13 +10,13 @@ defmodule DownlyWorker do
     {:ok, result} = Redix.command(:redix, ["RPOP", "downly:queue"])
     case result do
       nil ->
-        Logger.info("NOTHING TO DO.")
+        Logger.info("nothing in queue.")
         :timer.sleep(1000)
         start()
       _ ->
-        message = Poison.encode!(result)
-        Logger.info(message)
-        download(message)
+        data = Poison.decode!(result)
+        Logger.info(data)
+        download(data)
         :timer.sleep(1000)
         start()
     end
@@ -32,7 +32,7 @@ defmodule DownlyWorker do
           # that might be thrown and return the worker back to poolboy in a clean manner. It also allows
           # the programmer to retrieve the error and potentially fix it.
           try do
-            GenServer.call(pid, {:download, message})
+            GenServer.call(pid, {:process, message})
           catch
             e, r -> Logger.error("poolboy transaction caught error: #{inspect(e)}, #{inspect(r)}")
             :ok
