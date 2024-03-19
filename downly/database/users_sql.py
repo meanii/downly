@@ -1,11 +1,6 @@
 import threading
 
-from sqlalchemy import (
-    Column,
-    BigInteger,
-    UnicodeText,
-    String
-)
+from sqlalchemy import Column, BigInteger, UnicodeText, String
 from downly import get_logger
 from downly.database import BASE, SESSION
 
@@ -27,7 +22,7 @@ class Users(BASE):
 
 
 class Chats(BASE):
-    __tablename__ = 'chats'
+    __tablename__ = "chats"
     chat_id = Column(String, primary_key=True)
     chat_name = Column(UnicodeText, nullable=False)
 
@@ -46,11 +41,14 @@ INSERTION_LOCK = threading.RLock()
 
 
 def update_user(user_id: int, username: str):
+    """
+    Add/Update a user in the db
+    """
     with INSERTION_LOCK:
         user = SESSION.query(Users).get(user_id)
         if not user:
             user = Users(user_id, username)
-            logger.info(f'[DB]: adding new user to db {user_id} ({username})')
+            logger.info(f"[DB]: adding new user to db {user_id} ({username})")
             SESSION.add(user)
             SESSION.flush()
         else:
@@ -60,11 +58,14 @@ def update_user(user_id: int, username: str):
 
 
 def update_chat(chat_id: str, chat_name: str):
+    """
+    Add/Update a chat in the db
+    """
     with INSERTION_LOCK:
         chat = SESSION.query(Chats).get(str(chat_id))
         if not chat:
             chat = Chats(chat_id, chat_name)
-            logger.info(f'[DB]: adding new chat to db {chat_id} ({chat_name})')
+            logger.info(f"[DB]: adding new chat to db {chat_id} ({chat_name})")
             SESSION.add(chat)
             SESSION.flush()
         else:
@@ -74,6 +75,9 @@ def update_chat(chat_id: str, chat_name: str):
 
 
 def count_users():
+    """
+    Count the number of users in the database
+    """
     try:
         return SESSION.query(Users).count()
     finally:
@@ -81,7 +85,74 @@ def count_users():
 
 
 def count_chats():
+    """
+    Count the number of chats in the database
+    """
     try:
         return SESSION.query(Chats).count()
+    finally:
+        SESSION.close()
+
+
+def count_last_24_hours_active_users():
+    """
+    Count users who have used the bot in the last 24 hours
+    """
+    try:
+        return (
+            SESSION.query(Users)
+            .filter(
+                Users.updated_at > datetime.datetime.now() - datetime.timedelta(days=1)
+            )
+            .count()
+        )
+    finally:
+        SESSION.close()
+
+
+def count_last_24_hours_users():
+    """
+    Count users who have joined in the last 24
+    """
+    try:
+        return (
+            SESSION.query(Users)
+            .filter(
+                Users.created_at > datetime.datetime.now() - datetime.timedelta(days=1)
+            )
+            .count()
+        )
+    finally:
+        SESSION.close()
+
+
+def count_last_24_hours_chats():
+    """
+    Count chats that have been active in the last 24 hours
+    """
+    try:
+        return (
+            SESSION.query(Chats)
+            .filter(
+                Chats.updated_at > datetime.datetime.now() - datetime.timedelta(days=1)
+            )
+            .count()
+        )
+    finally:
+        SESSION.close()
+
+
+def count_last_24_hours_active_chats():
+    """
+    Count chats that have been active in the last 24 hours
+    """
+    try:
+        return (
+            SESSION.query(Chats)
+            .filter(
+                Chats.updated_at > datetime.datetime.now() - datetime.timedelta(days=1)
+            )
+            .count()
+        )
     finally:
         SESSION.close()

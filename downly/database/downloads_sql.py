@@ -35,6 +35,9 @@ DOWNLOADS_INSERTION_LOCK = threading.RLock()
 
 
 def add_download(link: str, user_id: bin, chat_id: str):
+    """
+    Add a new download to the db
+    """
     with DOWNLOADS_INSERTION_LOCK:
         download = Downloads(link, user_id, chat_id)
         logger.info(f'[DB]: adding new download to db {link} ({user_id})')
@@ -44,7 +47,31 @@ def add_download(link: str, user_id: bin, chat_id: str):
 
 
 def count_downloads():
+    """
+    count all downloads
+    """
     try:
         return SESSION.query(Downloads).count()
     finally:
+<<<<<<< Updated upstream
         SESSION.close()
+=======
+        SESSION.close()
+
+
+def count_last_24_hours_downloads():
+    """
+    Count downloads in the last 24 hours
+    """
+    try:
+        return (
+            SESSION.query(Downloads)
+            .filter(
+                Downloads.created_at
+                > (datetime.datetime.now() - datetime.timedelta(days=1))
+            )
+            .count()
+        )
+    finally:
+        SESSION.close()
+>>>>>>> Stashed changes
