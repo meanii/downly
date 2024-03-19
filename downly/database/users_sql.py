@@ -1,11 +1,6 @@
 import threading
-
-from sqlalchemy import (
-    Column,
-    BigInteger,
-    UnicodeText,
-    String
-)
+import datetime
+from sqlalchemy import Column, BigInteger, UnicodeText, String, DateTime
 from downly import get_logger
 from downly.database import BASE, SESSION
 
@@ -17,6 +12,10 @@ class Users(BASE):
 
     user_id = Column(BigInteger, primary_key=True)
     username = Column(UnicodeText)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(
+        DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now
+    )
 
     def __init__(self, user_id, username=None):
         self.user_id = user_id
@@ -27,9 +26,13 @@ class Users(BASE):
 
 
 class Chats(BASE):
-    __tablename__ = 'chats'
+    __tablename__ = "chats"
     chat_id = Column(String, primary_key=True)
     chat_name = Column(UnicodeText, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(
+        DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now
+    )
 
     def __init__(self, chat_id, chat_name):
         self.chat_id = str(chat_id)
@@ -50,7 +53,7 @@ def update_user(user_id: int, username: str):
         user = SESSION.query(Users).get(user_id)
         if not user:
             user = Users(user_id, username)
-            logger.info(f'[DB]: adding new user to db {user_id} ({username})')
+            logger.info(f"[DB]: adding new user to db {user_id} ({username})")
             SESSION.add(user)
             SESSION.flush()
         else:
@@ -64,7 +67,7 @@ def update_chat(chat_id: str, chat_name: str):
         chat = SESSION.query(Chats).get(str(chat_id))
         if not chat:
             chat = Chats(chat_id, chat_name)
-            logger.info(f'[DB]: adding new chat to db {chat_id} ({chat_name})')
+            logger.info(f"[DB]: adding new chat to db {chat_id} ({chat_name})")
             SESSION.add(chat)
             SESSION.flush()
         else:

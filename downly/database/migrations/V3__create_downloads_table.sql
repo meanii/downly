@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS downloads (
+  id SERIAL PRIMARY KEY,
+  link VARCHAR(255) NOT NULL,
+  user_id BIGINT NOT NULL,
+  chat_id VARCHAR(255) NOT NULL
+);
