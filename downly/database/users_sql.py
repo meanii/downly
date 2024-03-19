@@ -61,6 +61,7 @@ def update_user(user_id: int, username: str):
             SESSION.flush()
         else:
             user.username = username
+            user.updated_at = datetime.datetime.now()
 
         SESSION.commit()
 
@@ -78,6 +79,7 @@ def update_chat(chat_id: str, chat_name: str):
             SESSION.flush()
         else:
             chat.chat_name = chat_name
+            chat.updated_at = datetime.datetime.now()
 
         SESSION.commit()
 
