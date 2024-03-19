@@ -5,6 +5,16 @@ services:
       - "./downloads:/app/downloads"
       - "./config.yaml:/app/config.yaml"
     restart: unless-stopped # restart the bot if it crashes
+    depends_on:
+      - postgres
+
+  flyway:
+    image: flyway/flyway
+    command: -url=jdbc:postgresql://postgres:5432/downly -user=downly -password=downly -baselineOnMigrate=true migrate
+    volumes:
+      - "./downly/database/migrations:/flyway/sql"
+    depends_on:
+      - postgres
 
   postgres:
       image: postgres:13.3-alpine
@@ -15,3 +25,4 @@ services:
       volumes:
           - "./postgres-data:/var/lib/postgresql/data"
       restart: unless-stopped # restart the postgres if it crashes
+
