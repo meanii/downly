@@ -1,6 +1,6 @@
 import threading
-
-from sqlalchemy import Column, BigInteger, UnicodeText, String
+import datetime
+from sqlalchemy import Column, BigInteger, UnicodeText, String, DateTime
 from downly import get_logger
 from downly.database import BASE, SESSION
 
@@ -12,6 +12,10 @@ class Users(BASE):
 
     user_id = Column(BigInteger, primary_key=True)
     username = Column(UnicodeText)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(
+        DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now
+    )
 
     def __init__(self, user_id, username=None):
         self.user_id = user_id
@@ -25,6 +29,10 @@ class Chats(BASE):
     __tablename__ = "chats"
     chat_id = Column(String, primary_key=True)
     chat_name = Column(UnicodeText, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    updated_at = Column(
+        DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now
+    )
 
     def __init__(self, chat_id, chat_name):
         self.chat_id = str(chat_id)

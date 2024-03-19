@@ -1,11 +1,6 @@
 import threading
-from sqlalchemy import (
-    Column,
-    BigInteger,
-    UnicodeText,
-    String,
-    Integer
-)
+import datetime
+from sqlalchemy import Column, BigInteger, UnicodeText, String, Integer, DateTime
 from downly import get_logger
 from downly.database import BASE, SESSION
 
@@ -19,6 +14,7 @@ class Downloads(BASE):
     link = Column(UnicodeText, nullable=False)
     user_id = Column(BigInteger, nullable=False)
     chat_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.now)
 
     def __init__(self, link: str, user_id: bin, chat_id: str):
         self.user_id = user_id
@@ -40,7 +36,7 @@ def add_download(link: str, user_id: bin, chat_id: str):
     """
     with DOWNLOADS_INSERTION_LOCK:
         download = Downloads(link, user_id, chat_id)
-        logger.info(f'[DB]: adding new download to db {link} ({user_id})')
+        logger.info(f"[DB]: adding new download to db {link} ({user_id})")
         SESSION.add(download)
         SESSION.flush()
         SESSION.commit()
@@ -53,9 +49,6 @@ def count_downloads():
     try:
         return SESSION.query(Downloads).count()
     finally:
-<<<<<<< Updated upstream
-        SESSION.close()
-=======
         SESSION.close()
 
 
@@ -74,4 +67,3 @@ def count_last_24_hours_downloads():
         )
     finally:
         SESSION.close()
->>>>>>> Stashed changes
