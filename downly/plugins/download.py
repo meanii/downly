@@ -148,6 +148,8 @@ async def download(client: Client, message: Message):
 
         for picker in pickers:
             await send_video(message=message, video=picker.get("url"))
+
+        await first_message.delete()
         logger.info(f'finished handling request for {user_url_message} - '
                     f'from {title}({id})')
         return
