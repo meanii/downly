@@ -134,7 +134,16 @@ async def download(client: Client, message: Message):
 
     if output.get('status') == 'redirect':
         # sending video
-        await send_video(message=message, video=output.get("url"))
+        try:
+            await send_video(message=message, video=output.get("url"))
+        except Exception as e:
+            logger.error(f'Error occurred while processing {user_url_message}\n'
+                 f'Error message: {e}')
+            await first_message.edit_text(
+                'An error occurred. Please try again later.'
+                f'\nError details: `{e}`'
+            )
+            return
 
         await first_message.delete()
         logger.info(f'finished handling request for {user_url_message} - '
@@ -147,7 +156,16 @@ async def download(client: Client, message: Message):
             return await first_message.edit_text('No video found.')
 
         for picker in pickers:
-            await send_video(message=message, video=picker.get("url"))
+            try:
+                await send_video(message=message, video=picker.get("url"))
+            except Exception as e:
+                logger.error(f'Error occurred while processing {user_url_message}\n'
+                             f'Error message: {e}')
+                await first_message.reply_text(
+                    'An error occurred. Please try again later.'
+                    f'\nError details: `{e}`'
+                )
+                continue
 
         await first_message.delete()
         logger.info(f'finished handling request for {user_url_message} - '
