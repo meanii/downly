@@ -5,12 +5,20 @@ from pathlib import Path
 
 logger = get_logger(__name__)
 
+def get_extension(file_path: str):
+    try:
+        ext = f'.{file_path.split("?")[0].split(".")[-1]}'
+        return ext
+    except Exception as e:
+        logger.error(f"Error getting extension: {e}")
+        ext = None
+
 def get_media_type(file_path: str):
     videos = ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov', '.wmv', '.m4v']
     audios = ['.mp3', '.m4a', '.flac', '.wav', '.ogg', '.opus']
     images = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
 
-    ext = f'.{file_path.split("?")[0].split(".")[-1]}'
+    ext = get_extension(file_path)
     logger.info(f"file extension: {ext}")
     
     if ext in videos:
@@ -20,7 +28,7 @@ def get_media_type(file_path: str):
     elif ext in images:
         return 'image'
     else:
-        return 'document'
+        return 'video' # default to video if not in the above lists, because it's the most common
 
 
 
