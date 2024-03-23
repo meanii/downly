@@ -141,5 +141,17 @@ async def download(client: Client, message: Message):
                     f'from {title}({id})')
         return
 
+    if output.get('status') == 'picker':
+        pickers = output.get('picker')
+        if not pickers:
+            return await first_message.edit_text('No video found.')
+
+        for picker in pickers:
+            await send_video(message=message, video=picker.get("url"))
+        logger.info(f'finished handling request for {user_url_message} - '
+                    f'from {title}({id})')
+        return
+
+
     error_message = 'An error occurred. Please try again later.'
     return await first_message.edit_text(error_message)
