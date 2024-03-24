@@ -71,4 +71,3 @@ class StreamDownloader:
         """
         Path(self.output_path).unlink(missing_ok=True)
         logger.info(f"deleted {self.output_path}")
-

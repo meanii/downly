@@ -121,8 +121,8 @@ async def download(client: Client, message: Message):
     # handling error message
     if output.get("status") == "error":
         error_message = (
-            'Apologies, an error occurred.\n'
-            'Please attempt your request later.\n'
+            "Apologies, an error occurred.\n"
+            "Please attempt your request later.\n"
             f'Message details: `{output.get("text")}`'
         )
         return await first_message.edit_text(error_message)
