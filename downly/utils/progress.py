@@ -15,16 +15,18 @@ class Progress:
         self.current = current
 
         logger.info(
-            f'uploading for {self.message.chat.title}({self.message.chat.id}) '
-            f'{current * 100 / self.total:.1f}% '
-            f'input: {self.message.text}'
+            f"uploading for {self.message.chat.title}({self.message.chat.id}) "
+            f"{current * 100 / self.total:.1f}% "
+            f"input: {self.message.text}"
         )
 
         try:
             await self.message.edit_text(
-                f'uploading {current * 100 / self.total:.1f}%\nPlease have patience...'
+                f"uploading {current * 100 / self.total:.1f}%\nPlease have patience..."
             )
         except Exception as e:
-            logger.error(f'Error while editing message for {self.message.text} - '
-                         f'error message: {e}')
+            logger.error(
+                f"Error while editing message for {self.message.text} - "
+                f"error message: {e}"
+            )
             return

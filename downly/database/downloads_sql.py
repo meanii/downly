@@ -67,3 +67,4 @@ def count_last_24_hours_downloads():
         )
     finally:
         SESSION.close()
+

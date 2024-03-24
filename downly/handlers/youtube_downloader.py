@@ -7,9 +7,9 @@ logger = get_logger(__name__)
 
 
 def progress_hook(d):
-    if d['status'] == 'finished':
+    if d["status"] == "finished":
         logger.info(f"finished downloading {d['filename']}")
-    if d['status'] == 'downloading':
+    if d["status"] == "downloading":
         logger.info(f"downloading {d['filename']} {d['_percent_str']} {d['_eta_str']}")
 
 
@@ -22,8 +22,8 @@ class YoutubeDownloader:
 
     async def download(self):
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': f'{self.output_dir}/%(title)s.%(ext)s'
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": f"{self.output_dir}/%(title)s.%(ext)s",
         }
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             # add progress hook

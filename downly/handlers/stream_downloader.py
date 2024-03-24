@@ -22,13 +22,20 @@ class StreamDownloader:
         SLOW_DOWNLOAD_THRESHOLD = 300  # 300 bytes
         SLOW_DOWNLOAD_TRIES = 30  # 30 times
 
-        make_sure_path_exists(Path(self.output_path).parent)  # make sure parent directory exists
+        make_sure_path_exists(
+            Path(self.output_path).parent
+        )  # make sure parent directory exists
         print(f"downloading {self.url} to {self.output_path}")
         async with self.client.stream("GET", self.url) as response:
-
             # get file name and extension from stream response
-            file_name = response.headers.get("Content-Disposition").split("filename=")[1].replace('"', "")
-            self.output_path = self.output_path.replace("[STREAM_FILENAME]", f"{file_name}")
+            file_name = (
+                response.headers.get("Content-Disposition")
+                .split("filename=")[1]
+                .replace('"', "")
+            )
+            self.output_path = self.output_path.replace(
+                "[STREAM_FILENAME]", f"{file_name}"
+            )
 
             with open(self.output_path, "wb") as file:
                 async for chunk in response.aiter_bytes():
@@ -38,13 +45,19 @@ class StreamDownloader:
                     if len(chunk) < SLOW_DOWNLOAD_THRESHOLD:
                         SLOW_DOWNLOAD_TRIES -= 1
                         if SLOW_DOWNLOAD_TRIES == 0:
-                            logger.error(f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} "
-                                         f"bytes/s. The associated file has been removed.")
+                            logger.error(
+                                f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} "
+                                f"bytes/s. The associated file has been removed."
+                            )
                             await self.delete()
-                            raise Exception(f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} "
-                                            f"bytes/s. The associated file has been removed.")
-                        logger.warning(f"The download speed is slow, less than 1kb/s. {SLOW_DOWNLOAD_TRIES} attempts "
-                                       f"remaining.")
+                            raise Exception(
+                                f"The download speed is insufficient, at less than {SLOW_DOWNLOAD_THRESHOLD} "
+                                f"bytes/s. The associated file has been removed."
+                            )
+                        logger.warning(
+                            f"The download speed is slow, less than 1kb/s. {SLOW_DOWNLOAD_TRIES} attempts "
+                            f"remaining."
+                        )
 
                     file.write(chunk)
                 logger.info(f"finished writing {self.output_path}")
@@ -58,3 +71,4 @@ class StreamDownloader:
         """
         Path(self.output_path).unlink(missing_ok=True)
         logger.info(f"deleted {self.output_path}")
+

@@ -11,9 +11,9 @@ BASE = declarative_base()
 
 
 def start() -> scoped_session:
-    postgres_url = database_configs.get('postgres_url')
+    postgres_url = database_configs.get("postgres_url")
     engine = create_engine(postgres_url, client_encoding="utf8")
-    logger.info(f'[PostgreSQL] connecting to database... {engine.url}')
+    logger.info(f"[PostgreSQL] connecting to database... {engine.url}")
 
     if not database_exists(engine.url):
         logger.warning("database doesn't exist, creating new one...")
@@ -27,7 +27,7 @@ def start() -> scoped_session:
 try:
     SESSION = start()
 except Exception as e:
-    logger.exception(f'[PostgreSQL] Failed to connect due to {e}')
+    logger.exception(f"[PostgreSQL] Failed to connect due to {e}")
     exit()
 
 logger.info("[PostgreSQL] Connection successful, session started.")

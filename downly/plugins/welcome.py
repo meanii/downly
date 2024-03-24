@@ -7,13 +7,11 @@ from pyrogram.types import Message
 @Downly.on_message(filters.new_chat_members)
 @b_logger
 async def start(client: Client, message: Message):
-
     # get bot info
     bot_info = await client.get_me()
 
     welcome_message = (
-        'Herzlich willkommen in der Gruppe!\n'
-        'join @spookyanii for updates'
+        "Herzlich willkommen in der Gruppe!\n" "join @spookyanii for updates"
     )
 
     # check if user is added in new chat
@@ -21,5 +19,6 @@ async def start(client: Client, message: Message):
         await client.send_message(
             chat_id=message.chat.id,
             text=welcome_message,
-            reply_to_message_id=message.id
+            reply_to_message_id=message.id,
         )
+

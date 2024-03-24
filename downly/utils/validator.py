@@ -24,10 +24,22 @@ def is_supported_service(service: str) -> bool:
     :return: bool
     """
 
-    domain = urlparse(service).hostname.replace('www.', '')
+    domain = urlparse(service).hostname.replace("www.", "")
     AVAILABLE_SERVICES = [
-        'bilibili.com', 'youtube.com', 'youtu.be', 'tiktok.com', 'twitter.com', 'instagram.com',
-        'pinterest.com', 'reddit.com', 'rutube.ru', 'vimeo.com', 'soundcloud.com',
-        'vine.co', 'dailymotion.com', 'vk.com', 'tumblr.com'
+        "bilibili.com",
+        "youtube.com",
+        "youtu.be",
+        "tiktok.com",
+        "twitter.com",
+        "instagram.com",
+        "pinterest.com",
+        "reddit.com",
+        "rutube.ru",
+        "vimeo.com",
+        "soundcloud.com",
+        "vine.co",
+        "dailymotion.com",
+        "vk.com",
+        "tumblr.com",
     ]
     return domain in AVAILABLE_SERVICES
