@@ -144,7 +144,7 @@ def count_last_24_hours_chats():
         return (
             SESSION.query(Chats)
             .filter(
-                Chats.updated_at > datetime.datetime.now() - datetime.timedelta(days=1)
+                Chats.created_at > datetime.datetime.now() - datetime.timedelta(days=1)
             )
             .count()
         )

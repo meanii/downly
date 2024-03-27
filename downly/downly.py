@@ -50,4 +50,3 @@ class Downly(Client):
     async def stop(self, *args):
         await super().stop()
         logger.info("Downly 🦉 stopped. Bye.")
-
