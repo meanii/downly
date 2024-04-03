@@ -11,7 +11,8 @@ async def start(client: Client, message: Message):
     bot_info = await client.get_me()
 
     welcome_message = (
-        "Herzlich willkommen in der Gruppe!\n" "join @spookyanii for updates"
+        "downly hier! Bereit zum Herunterladen und Hochladen von Dateien für dich. Schick mir einfach den Link!\n"
+        "join @spookyanii for updates"
     )
 
     # check if user is added in new chat
@@ -21,4 +22,3 @@ async def start(client: Client, message: Message):
             text=welcome_message,
             reply_to_message_id=message.id,
         )
-
