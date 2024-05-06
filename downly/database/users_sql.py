@@ -56,7 +56,7 @@ def update_user(user_id: int, username: str):
         user = SESSION.query(Users).get(user_id)
         if not user:
             user = Users(user_id, username)
-            logger.info(f"[DB]: adding new user to db {user_id} ({username})")
+            logger.info(f"[{__file__}]: adding new user to db {user_id} ({username})")
             SESSION.add(user)
             SESSION.flush()
         else:
@@ -74,7 +74,7 @@ def update_chat(chat_id: str, chat_name: str):
         chat = SESSION.query(Chats).get(str(chat_id))
         if not chat:
             chat = Chats(chat_id, chat_name)
-            logger.info(f"[DB]: adding new chat to db {chat_id} ({chat_name})")
+            logger.info(f"[{__file__}]: adding new chat to db {chat_id} ({chat_name})")
             SESSION.add(chat)
             SESSION.flush()
         else:

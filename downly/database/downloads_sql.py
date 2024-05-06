@@ -36,7 +36,7 @@ def add_download(link: str, user_id: bin, chat_id: str):
     """
     with DOWNLOADS_INSERTION_LOCK:
         download = Downloads(link, user_id, chat_id)
-        logger.info(f"[DB]: adding new download to db {link} ({user_id})")
+        logger.info(f"[{__file__}]: adding new download to db {link} ({user_id})")
         SESSION.add(download)
         SESSION.flush()
         SESSION.commit()
