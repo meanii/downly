@@ -14,9 +14,9 @@ downly:
     owner: "" # telegram bot owner userid
     channel_id: "" # telegram channel id
     public: "true" # downly making enabling for public use, false will make only for an owner only
-    cobalt_base_url: "https://co.wuk.sh" # cobalt base url
+    cobalt_base_url: "https://api.cobalt.meanii.dev" # cobalt base url
 
   # database configs
   database:
-    postgres_url: "postgres://downly:downly@localhost:5432/downly" # postgres url
+    postgres_url: "postgresql://downly:downly@localhost:5432/downly" # postgres url
     redis_url: "redis://localhost:6379" # redis url
