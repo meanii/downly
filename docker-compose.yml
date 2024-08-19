@@ -10,7 +10,7 @@ services:
 
   flyway:
     image: flyway/flyway
-    command: -url=jdbc:postgresql://postgres:5432/downly -user=meanii -password=meanii -baselineOnMigrate=true migrate
+    command: -url=jdbc:postgresql://postgres:5432/downly -user=downly -password=downly -baselineOnMigrate=true migrate
     volumes:
       - "./downly/database/migrations:/flyway/sql"
     depends_on:
