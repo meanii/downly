@@ -1,10 +1,9 @@
+from loguru import logger
 import threading
 import datetime
 from sqlalchemy import Column, BigInteger, UnicodeText, String, DateTime
-from downly import get_logger
-from downly.database import BASE, SESSION
 
-logger = get_logger(__name__)
+from downly.database import BASE, SESSION
 
 
 class Users(BASE):

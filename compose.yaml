@@ -1,7 +1,9 @@
 ---
 services:
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bot
     volumes:
       - "./downloads:/app/downloads"
       - "./config.yaml:/app/config.yaml"

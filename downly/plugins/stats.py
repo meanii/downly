@@ -1,5 +1,6 @@
+from downly import __config__
+
 from pyrogram import filters
-from downly import get_logger, configs
 from downly.downly import Downly
 from downly.utils.b_logger import b_logger
 
@@ -13,13 +14,11 @@ from downly.database.users_sql import (
 )
 from downly.database.downloads_sql import count_downloads, count_last_24_hours_downloads
 
-logger = get_logger(__name__)
-
 
 @Downly.on_message(filters.command(commands="stats", prefixes="/"))
 @b_logger
 async def stats(_, message):
-    OWNER_ID = str(configs.get("owner"))
+    OWNER_ID = str(__config__.configs.owner)
 
     if not str(message.from_user.id) == OWNER_ID:
         return

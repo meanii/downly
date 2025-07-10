@@ -1,0 +1,31 @@
+# # This file defines the Docker Compose configuration for the development environment.
+# # It includes services for the bot, database, and message broker.
+---
+services:
+  db:
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: downly
+      POSTGRES_PASSWORD: downly
+      POSTGRES_DB: downly
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: downly
+      RABBITMQ_DEFAULT_PASS: downly
+    ports:
+      - "5672:5672"    # AMQP protocol port
+      - "15672:15672"  # HTTP management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+volumes:
+  db_data:
+  rabbitmq_data:

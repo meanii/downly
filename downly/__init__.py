@@ -1,22 +1,18 @@
-import logging.config
-
+from loguru import logger
 from pathlib import Path
-from downly.utils.yaml_utils import get_yaml
-from downly.utils.bot_info import bot
-
-config = get_yaml(Path.resolve(Path.cwd() / "config.yaml"))
-
-telegram = config.get("downly").get(
-    "telegram"
-)  # telegram configs, api_id, api_hash, bot_token
-configs = config.get("downly").get("configs")  # configs for plugins
-database_configs = config.get("downly").get(
-    "database"
-)  # database configs, postgresql and redis
-
-# logging configs
-logging.config.fileConfig(fname="logger.conf", disable_existing_loggers=False)
+from downly.rabbitmq.connection import initialize_rabbitmq_client
+from downly.models.config import load_config_from_yaml, DownlyConfig
+import sys
 
 
-def get_logger(name: str):
-    return logging.getLogger(name)
+# Load configuration
+try:
+    config_path = Path.resolve(Path.cwd() / "config.yaml")
+    __config__: DownlyConfig = load_config_from_yaml(config_path)
+    logger.info(f"Loaded configuration from {config_path}")
+except Exception as e:
+    logger.critical(f"Failed to load configuration: {e}")
+    sys.exit(1)
+
+# Initialize RabbitMQ client
+rabbitmq_client = initialize_rabbitmq_client(__config__)

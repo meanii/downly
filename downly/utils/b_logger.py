@@ -1,9 +1,7 @@
+from loguru import logger
 from pyrogram.types import Message
-from downly import get_logger
+
 from downly.utils.validator import validate_url
-
-
-logger = get_logger("bot")  # logger for bot
 
 
 def b_logger(func):

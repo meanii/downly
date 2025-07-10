@@ -1,17 +1,19 @@
+from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 
 from sqlalchemy_utils import database_exists, create_database
+from downly import __config__
 
-from downly import database_configs, get_logger
-
-logger = get_logger(__name__)
 BASE = declarative_base()
 
 
 def start() -> scoped_session:
-    postgres_url = database_configs.get("postgres_url")
+    """
+    Start the PostgreSQL database connection and create a session.
+    """
+    postgres_url = __config__.database.postgres_url
     engine = create_engine(postgres_url, client_encoding="utf8")
     logger.info(f"[PostgreSQL] connecting to database... {engine.url}")
 
@@ -34,6 +36,10 @@ logger.info("[PostgreSQL] Connection successful, session started.")
 
 
 def __get_all_databases():
+    """
+    Get all database modules in the current directory.
+    This is used to dynamically import all database modules for the * in __init__ to work
+    """
     from os.path import dirname, basename, isfile
     import glob
 

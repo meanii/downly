@@ -1,5 +1,4 @@
 downly:
-
   app_name: "downly"
 
   # telegram api configs, get your own config by visiting http://my.telegram.org/
@@ -19,4 +18,13 @@ downly:
   # database configs
   database:
     postgres_url: "postgresql://downly:downly@localhost:5432/downly" # postgres url
-    redis_url: "redis://localhost:6379" # redis url
+
+  # rabbitmq configs
+  rabbitmq:
+    host: "localhost" # rabbitmq host
+    port: 5672 # rabbitmq port
+    username: "downly" # rabbitmq username
+    password: "downly" # rabbitmq password
+
+    # rabbitmq extra configs
+    durable: true # make sure the queue is durable
