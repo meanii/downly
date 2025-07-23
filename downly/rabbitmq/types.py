@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Callable
 from .callbacks.user_state_updater import user_state_updator
+from .callbacks.chat_state_updater import chat_state_updator
 
 
 class RabbitMQPublisherConfig(BaseModel):
@@ -57,6 +58,18 @@ class AvailablePublishers:
             "chats": "downly.event.stats.updater.chats.routing.key"
         }
     )
+    
+    # downly to worker adding queue
+    DOWNLY_WORKER_QUEUE_PUBLISHER: RabbitMQPublisherConfig = RabbitMQPublisherConfig(
+        name="DOWNLY_WORKER_QUEUE_PUBLISHER",
+        exchange="downly.worker.queue.exchange",
+        exchange_type="topic",
+        durable=True,
+        routing_keys = {
+            "gallerydl": "downly.worker.queue.gallerydl.routing.key",
+            "ytdl": "downly.worker.queue.ytdl.routing.key"
+        }
+    )
 
 
 class AvailableConsumers:
@@ -78,6 +91,6 @@ class AvailableConsumers:
         queue="downly.event.stats.updater.chats.queue",
         exchange="downly.event.stats.updater.exchange",
         durable=True,
-        callback=user_state_updator,  # Replace with actual callback function
+        callback=chat_state_updator,  # Replace with actual callback function
         routing_binding_key="downly.event.stats.updater.chats.routing.key"  # Use the first binding key for simplicity
     )
