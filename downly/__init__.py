@@ -10,9 +10,6 @@ from downly.rabbitmq.client import RabbitMQConnectionConfig, RabbitMQConnectionM
 from downly.rabbitmq.registry import EnableRabbitMQPublisherRegistry, EnableRabbitMQConsumerRegistry
 
 
-
-
-
 __config__ = Config().get_instance()
 
 # Initialize RabbitMQ client
