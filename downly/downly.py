@@ -5,7 +5,7 @@ from datetime import datetime
 from pyrogram import Client
 from pyrogram import __version__
 from pyrogram.raw.all import layer
-from downly import __config__, rabbitmq_client
+from downly import __config__, rabbit_client, enable_rabbitmq_consumer_registry
 from pathlib import Path
 
 from downly.utils.bot_info import bot
@@ -50,5 +50,12 @@ class Downly(Client):
     async def stop(self, *args):
         await super().stop()
         logger.info("Downly 🦉 stopped. Bye.")
-        rabbitmq_client.close()
+        
+        # disable RabbitMQ Consumer Registry
+        enable_rabbitmq_consumer_registry.disable()
+        logger.info("RabbitMQ Consumer Registry disabled.")
+        
+        # Close RabbitMQ connection
+        rabbit_client.close()
         logger.info("RabbitMQ connection closed.")
+        

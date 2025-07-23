@@ -1,18 +1,47 @@
-from loguru import logger
-from pathlib import Path
-from downly.rabbitmq.connection import initialize_rabbitmq_client
-from downly.models.config import load_config_from_yaml, DownlyConfig
 import sys
+from loguru import logger
+
+from downly.monitor import MonitoringTaskRunner
+
+from downly.config import Config
+from downly import database # loading database before rabbitmq, and just after config ( config auto load itself )
+
+from downly.rabbitmq.client import RabbitMQConnectionConfig, RabbitMQConnectionManagerSingleton
+from downly.rabbitmq.registry import EnableRabbitMQPublisherRegistry, EnableRabbitMQConsumerRegistry
 
 
-# Load configuration
-try:
-    config_path = Path.resolve(Path.cwd() / "config.yaml")
-    __config__: DownlyConfig = load_config_from_yaml(config_path)
-    logger.info(f"Loaded configuration from {config_path}")
-except Exception as e:
-    logger.critical(f"Failed to load configuration: {e}")
-    sys.exit(1)
+
+
+
+__config__ = Config().get_instance()
 
 # Initialize RabbitMQ client
-rabbitmq_client = initialize_rabbitmq_client(__config__)
+rabbit_client = RabbitMQConnectionManagerSingleton.get_instance(
+    config=RabbitMQConnectionConfig(
+        host=__config__.rabbitmq.host,
+        port=__config__.rabbitmq.port,
+        username=__config__.rabbitmq.username,
+        password=__config__.rabbitmq.password,
+    )
+)
+rabbit_client.ensure_connection()
+
+# Ensure the RabbitMQ connection is established
+if not rabbit_client.ping():
+    logger.critical("Failed to connect to RabbitMQ server")
+    sys.exit(1)
+
+# Enable RabbitMQ Publisher Registry
+enable_rabbitmq_publisher_registry = EnableRabbitMQPublisherRegistry()
+enable_rabbitmq_publisher_registry.enable()
+
+# Enable RabbitMQ Consumer Registry
+enable_rabbitmq_consumer_registry = EnableRabbitMQConsumerRegistry()
+enable_rabbitmq_consumer_registry.enable()
+
+# Start background monitoring - fire and forget
+monitor = MonitoringTaskRunner()
+monitor.start_background_monitor(interval=10)
+
+# Your main application continues
+logger.info("Background monitoring started, continuing with main application...")

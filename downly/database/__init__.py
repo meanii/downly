@@ -1,19 +1,22 @@
+from sys import exit
 from loguru import logger
+from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 
 from sqlalchemy_utils import database_exists, create_database
-from downly import __config__
+from downly.config import Config
 
 BASE = declarative_base()
+SESSION: Optional[scoped_session] = None
 
 
 def start() -> scoped_session:
     """
     Start the PostgreSQL database connection and create a session.
     """
-    postgres_url = __config__.database.postgres_url
+    postgres_url = Config.get_instance().database.postgres_url     
     engine = create_engine(postgres_url, client_encoding="utf8")
     logger.info(f"[PostgreSQL] connecting to database... {engine.url}")
 

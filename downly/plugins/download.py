@@ -3,7 +3,6 @@ from pyrogram import filters, Client
 from pyrogram.types import Message
 from downly.utils.validator import validate_url, is_supported_service
 
-from downly import rabbitmq_client
 from downly.downly import Downly
 from downly.utils.b_logger import b_logger
 from downly.utils.message import get_chat_info
@@ -37,15 +36,3 @@ async def download(client: Client, message: Message):
         f"New message from {message.from_user.first_name}({message.from_user.id})"
         f" in {title}({id}) - [MESSAGE]: {user_url_message}"
     )
-
-    rabbitmq_client.publish({
-        "link": user_url_message,
-        "user_id": message.from_user.id,
-        "chat_id": id,
-        "chat_title": title,
-        "username": message.from_user.username,
-        "first_name": message.from_user.first_name,
-        "last_name": message.from_user.last_name,
-        "message_id": message.id,
-        "date": message.date.isoformat(),
-    })
