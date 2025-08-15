@@ -44,7 +44,3 @@ async def logger(client: Client, message: Message):
                 "text": message.text or "",
             }
         )
-        
-    await message.reply_text(
-        "Your message has been logged and processed. Thank you!"
-    )

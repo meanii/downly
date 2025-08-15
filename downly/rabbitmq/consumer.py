@@ -2,7 +2,7 @@
 import threading
 from time import sleep
 from loguru import logger
-from downly.rabbitmq.client import RabbitMQConnectionManagerSingleton
+from downly.clients.rabbitmq import RabbitMQConnectionManager
 from typing import Callable, Dict, Any
 
 class RabbitMQConsumer:
@@ -11,7 +11,7 @@ class RabbitMQConsumer:
     """
     def __init__(
         self,
-        connection_manager: RabbitMQConnectionManagerSingleton,
+        connection_manager: RabbitMQConnectionManager,
         queue: str,
         exchange: str,
         routing_key: str,
@@ -38,12 +38,20 @@ class RabbitMQConsumer:
                 return False
             
             try:
+
+                # Ensure the queue exists
                 channel.queue_declare(queue=self.queue, durable=self.durable)
+                
+                # Ensure the exchange exists
+                channel.exchange_declare(exchange=self.exchange, exchange_type='topic', durable=self.durable)
+
+                # Bind the queue to the exchange
                 channel.queue_bind(
                     exchange=self.exchange,
                     queue=self.queue,
                     routing_key=self.routing_key
                 )
+                
                 return True
             except Exception as e:
                 logger.error(f"Consumer setup failed: {e}")

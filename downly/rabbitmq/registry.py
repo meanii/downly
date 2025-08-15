@@ -3,7 +3,7 @@ from time import sleep
 from downly.rabbitmq.publisher import RabbitMQPublisher
 from downly.rabbitmq.consumer import RabbitMQConsumer
 from downly.rabbitmq.types import AvailablePublishers, AvailableConsumers
-from downly.rabbitmq.client import RabbitMQConnectionManagerSingleton
+from downly.clients.rabbitmq import RabbitMQConnectionManagerSingleton, RabbitMQConnectionManager
 from loguru import logger
 from typing import Union, Callable, Dict
 
@@ -53,7 +53,7 @@ class RabbitMQConsumerRegistry:
     def register_consumer(
         cls,
         name: str,
-        connection_manager: RabbitMQConnectionManagerSingleton,
+        connection_manager: RabbitMQConnectionManager,
         queue: str,
         exchange: str,
         routing_key: str,
@@ -139,6 +139,39 @@ class EnableRabbitMQConsumerRegistry:
     def enable(self):
         """Enable the consumer registry and start all consumers"""
         
+        # worker to downly.bot success event
+        RabbitMQConsumerRegistry.register_consumer(
+            AvailableConsumers.DOWNLY_WORKER_EVENT_SUCCESS.name,
+            connection_manager=RabbitMQConnectionManagerSingleton.get_instance(),
+            queue=AvailableConsumers.DOWNLY_WORKER_EVENT_SUCCESS.queue,
+            exchange=AvailableConsumers.DOWNLY_WORKER_EVENT_SUCCESS.exchange,
+            routing_key=AvailableConsumers.DOWNLY_WORKER_EVENT_SUCCESS.routing_binding_key,
+            callback=AvailableConsumers.DOWNLY_WORKER_EVENT_SUCCESS.callback,
+            durable=AvailableConsumers.DOWNLY_WORKER_EVENT_SUCCESS.durable
+        )
+
+        # worker to downly.bot failed event
+        RabbitMQConsumerRegistry.register_consumer(
+            AvailableConsumers.DOWNLY_WORKER_EVENT_FAILED.name,
+            connection_manager=RabbitMQConnectionManagerSingleton.get_instance(),
+            queue=AvailableConsumers.DOWNLY_WORKER_EVENT_FAILED.queue,
+            exchange=AvailableConsumers.DOWNLY_WORKER_EVENT_FAILED.exchange,
+            routing_key=AvailableConsumers.DOWNLY_WORKER_EVENT_FAILED.routing_binding_key,
+            callback=AvailableConsumers.DOWNLY_WORKER_EVENT_FAILED.callback,
+            durable=AvailableConsumers.DOWNLY_WORKER_EVENT_FAILED.durable
+        )
+
+        # worker to downly.bot progress event
+        RabbitMQConsumerRegistry.register_consumer(
+            AvailableConsumers.DOWNLY_WORKER_EVENT_PROGRESS.name,
+            connection_manager=RabbitMQConnectionManagerSingleton.get_instance(),
+            queue=AvailableConsumers.DOWNLY_WORKER_EVENT_PROGRESS.queue,
+            exchange=AvailableConsumers.DOWNLY_WORKER_EVENT_PROGRESS.exchange,
+            routing_key=AvailableConsumers.DOWNLY_WORKER_EVENT_PROGRESS.routing_binding_key,
+            callback=AvailableConsumers.DOWNLY_WORKER_EVENT_PROGRESS.callback,
+            durable=AvailableConsumers.DOWNLY_WORKER_EVENT_PROGRESS.durable
+        )
+
         # users consumer
         RabbitMQConsumerRegistry.register_consumer(
             AvailableConsumers.DOWNLY_EVENT_STATS_UPDATER_USERS_CONSUMER.name,
@@ -194,5 +227,16 @@ class EnableRabbitMQPublisherRegistry:
                 exchange=AvailablePublishers.DOWNLY_EVENT_STATS_UPDATER_PUBLISHER.exchange,
                 exchange_type=AvailablePublishers.DOWNLY_EVENT_STATS_UPDATER_PUBLISHER.exchange_type,
                 durable=AvailablePublishers.DOWNLY_EVENT_STATS_UPDATER_PUBLISHER.durable
+            )
+        )
+        
+        # Register the Downly Worker Queue Publisher
+        RabbitMQPublisherRegistry.register_publisher(
+            name=AvailablePublishers.DOWNLY_WORKER_QUEUE_PUBLISHER.name,
+            publisher=RabbitMQPublisher(
+                connection_manager=RabbitMQConnectionManagerSingleton.get_instance(),
+                exchange=AvailablePublishers.DOWNLY_WORKER_QUEUE_PUBLISHER.exchange,
+                exchange_type=AvailablePublishers.DOWNLY_WORKER_QUEUE_PUBLISHER.exchange_type,
+                durable=AvailablePublishers.DOWNLY_WORKER_QUEUE_PUBLISHER.durable
             )
         )

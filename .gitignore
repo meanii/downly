@@ -170,3 +170,6 @@ config.yaml
 *.session-journal
 
 develop
+
+
+gallery-dl

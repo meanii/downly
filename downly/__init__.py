@@ -4,10 +4,17 @@ from loguru import logger
 from downly.monitor import MonitoringTaskRunner
 
 from downly.config import Config
-from downly import database # loading database before rabbitmq, and just after config ( config auto load itself )
 
-from downly.rabbitmq.client import RabbitMQConnectionConfig, RabbitMQConnectionManagerSingleton
-from downly.rabbitmq.registry import EnableRabbitMQPublisherRegistry, EnableRabbitMQConsumerRegistry
+from downly import database  # pylint: disable=unused-importe
+
+from downly.clients.rabbitmq import (
+    RabbitMQConnectionConfig,
+    RabbitMQConnectionManagerSingleton,
+)
+from downly.rabbitmq.registry import (
+    EnableRabbitMQPublisherRegistry,
+    EnableRabbitMQConsumerRegistry,
+)
 
 
 __config__ = Config().get_instance()

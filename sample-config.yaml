@@ -1,19 +1,18 @@
 downly:
+
+  namespace: "production"
   app_name: "downly"
 
   # telegram api configs, get your own config by visiting http://my.telegram.org/
   telegram:
     api_id: ""
     api_hash: ""
-
     bot_token: "" # telegram bot token, get your own bot token by visiting @BotFather
 
   # downly bot configs
   configs:
     owner: "" # telegram bot owner userid
     channel_id: "" # telegram channel id
-    public: "true" # downly making enabling for public use, false will make only for an owner only
-    cobalt_base_url: "https://api.cobalt.meanii.dev" # cobalt base url
 
   # database configs
   database:
@@ -25,6 +24,22 @@ downly:
     port: 5672 # rabbitmq port
     username: "downly" # rabbitmq username
     password: "downly" # rabbitmq password
-
     # rabbitmq extra configs
     durable: true # make sure the queue is durable
+    # connection heatbeat
+    heartbeat_interval: 10 # 10 seconds
+    
+  # worker configuration
+  worker:
+    numbers_of_workers: 10 # number of total worker
+  
+  services:
+    # cobalt service
+    cobalt:
+      enabled: true # enable or disable cobalt service
+      api_url: "https://your-cobalt-instance-url.com" # cobalt API URL
+
+    # youtube-dl service
+    ytdl:
+      enabled: true # enable or disable youtube-dl service
+      bin: "yt-dlp" # path to yt-dlp binary, use yt-dlp instead of youtube-dl

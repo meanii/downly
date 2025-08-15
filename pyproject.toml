@@ -5,6 +5,7 @@ description = "touka bot for downloading media from various sources, including y
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.12.15",
     "httpx==0.25.1",
     "loguru>=0.7.3",
     "msgpack>=1.1.1",
@@ -13,6 +14,7 @@ dependencies = [
     "psycopg2-binary==2.9.9",
     "pydantic>=2.11.7",
     "pyrogram==2.0.106",
+    "python-telegram-bot>=20.6",
     "pyyaml==6.0.1",
     "sqlalchemy==2.0.23",
     "sqlalchemy-utils==0.41.1",

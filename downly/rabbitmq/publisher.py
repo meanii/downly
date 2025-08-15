@@ -3,7 +3,7 @@ from typing import Union
 from loguru import logger
 
 from downly.utils.fire_and_forget import fire_and_forget
-from downly.rabbitmq.client import RabbitMQConnectionManager
+from downly.clients.rabbitmq import RabbitMQConnectionManager
 
 
 class RabbitMQPublisher:
@@ -64,6 +64,9 @@ class RabbitMQPublisher:
                 return
 
             try:
+                logger.info(
+                    f"Publishing message to exchange: {self.exchange}, routing key: {routing_key}, body: {body}"
+                )
                 if isinstance(body, str):
                     body = body.encode("utf-8")
                 elif isinstance(body, dict):
