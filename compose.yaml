@@ -1,15 +1,29 @@
 ---
 services:
-  bot:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.bot
+
+  downly:
+    build: .
     volumes:
       - "./downloads:/app/downloads"
       - "./config.yaml:/app/config.yaml"
     restart: unless-stopped # restart the bot if it crashes
     depends_on:
       - postgres
+      - rabbitmq
+    
+  
+  # worker
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    volumes:
+      - "./downloads:/app/downloads"
+      - "./config.yaml:/app/config.yaml"
+    restart: unless-stopped # restart the worker if it crashes
+    depends_on:
+      - rabbitmq
+    command: ["/app/worker", "-config", "/app/config.yaml"]
 
   flyway:
     image: flyway/flyway
@@ -28,3 +42,13 @@ services:
     volumes:
       - "./postgres-data:/var/lib/postgresql/data"
     restart: unless-stopped # restart the postgres if it crashes
+
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: downly
+      RABBITMQ_DEFAULT_PASS: downly
+    volumes:
+      - "./rabbitmq_data:/var/lib/rabbitmq"
