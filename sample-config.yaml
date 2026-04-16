@@ -19,9 +19,26 @@ downly:
     numbers_of_workers: 2
     poll_interval_sec: 3
     work_dir: "./tmp"
-    max_file_size_mb: 45
+    max_file_size_mb: 50
+    stuck_job_minutes: 15
+    health_port: 8080
+
+  limits:
+    max_queued_per_user: 5
+    max_concurrent_per_user: 2
+    rate_limit_seconds: 10
+    max_retries: 1
+
+  admin:
+    user_ids: []
+
+  cleanup:
+    enabled: true
+    retention_hours: 72
 
   services:
     ytdl:
       enabled: true
       bin: "yt-dlp"
+      cookies_file: "/app/cookies/instagram.txt"
+      auto_update_hours: 6

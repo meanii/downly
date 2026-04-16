@@ -1,7 +1,26 @@
-# # This file defines the Docker Compose configuration for the development environment.
-# # It includes services for the bot, database, and message broker.
----
 services:
+  downly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./downloads:/app/downloads
+      - ./tmp:/app/tmp
+      - ./cookies:/app/cookies
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["-config", "/app/config.yaml"]
+
   db:
     image: postgres:16
     restart: always
@@ -13,19 +32,11 @@ services:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    restart: always
-    environment:
-      RABBITMQ_DEFAULT_USER: downly
-      RABBITMQ_DEFAULT_PASS: downly
-    ports:
-      - "5672:5672"    # AMQP protocol port
-      - "15672:15672"  # HTTP management UI
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U downly -d downly"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   db_data:
-  rabbitmq_data:
