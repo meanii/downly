@@ -1,3 +1,15 @@
+.git
+.build
+bin
+tmp
 downloads
-*.session
 postgres-data
+cookies
+config.yaml
+*.session
+*.md
+LICENSE
+sample-config.yaml
+compose*.yaml
+.idea
+.vscode

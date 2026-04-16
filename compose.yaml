@@ -1,54 +1,40 @@
----
 services:
-
   downly:
-    build: .
-    volumes:
-      - "./downloads:/app/downloads"
-      - "./config.yaml:/app/config.yaml"
-    restart: unless-stopped # restart the bot if it crashes
-    depends_on:
-      - postgres
-      - rabbitmq
-    
-  
-  # worker
-  worker:
     build:
-      context: ./worker
+      context: .
       dockerfile: Dockerfile
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
-      - "./downloads:/app/downloads"
-      - "./config.yaml:/app/config.yaml"
-    restart: unless-stopped # restart the worker if it crashes
+      - ./config.yaml:/app/config.yaml:ro
+      - ./downloads:/app/downloads
+      - ./tmp:/app/tmp
+      - ./cookies:/app/cookies
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on:
-      - rabbitmq
-    command: ["/app/worker", "-config", "/app/config.yaml"]
-
-  flyway:
-    image: flyway/flyway
-    command: -url=jdbc:postgresql://postgres:5432/downly -user=downly -password=downly -baselineOnMigrate=true migrate
-    volumes:
-      - "./downly/database/migrations:/flyway/sql"
-    depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    command: ["-config", "/app/config.yaml"]
 
   postgres:
-    image: postgres:13.3-alpine
+    image: postgres:16
     environment:
       POSTGRES_USER: downly
       POSTGRES_PASSWORD: downly
       POSTGRES_DB: downly
     volumes:
-      - "./postgres-data:/var/lib/postgresql/data"
-    restart: unless-stopped # restart the postgres if it crashes
+      - ./postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U downly -d downly"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-
-  rabbitmq:
-    image: rabbitmq:3-management
-    restart: always
-    environment:
-      RABBITMQ_DEFAULT_USER: downly
-      RABBITMQ_DEFAULT_PASS: downly
-    volumes:
-      - "./rabbitmq_data:/var/lib/rabbitmq"
+volumes: {}
