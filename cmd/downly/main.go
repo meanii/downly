@@ -22,6 +22,7 @@ import (
 	"github.com/meanii/downly/internal/logging"
 	mig "github.com/meanii/downly/internal/migrate"
 	"github.com/meanii/downly/internal/reaper"
+	"github.com/meanii/downly/internal/statsreport"
 	tgbot "github.com/meanii/downly/internal/telegram"
 	"github.com/meanii/downly/internal/updater"
 	"github.com/meanii/downly/internal/worker"
@@ -59,6 +60,10 @@ func main() {
 	}
 	if err := db.EnsureSchema(ctx, pool); err != nil {
 		logger.Error("ensure schema compatibility failed", "error", err)
+		os.Exit(1)
+	}
+	if err := db.EnsurePreferencesTable(ctx, pool); err != nil {
+		logger.Error("ensure preferences table failed", "error", err)
 		os.Exit(1)
 	}
 	logger.Info("schema ready")
@@ -100,6 +105,7 @@ func main() {
 	go cleanup.Loop(ctx, logger, pool, cfg.Downly.Cleanup.Enabled, cfg.Downly.Cleanup.RetentionHours)
 	go updater.Loop(ctx, logger, cfg.Downly.Services.YTDLP.Bin, cfg.Downly.Services.YTDLP.AutoUpdateHours)
 	go reaper.Loop(ctx, logger, pool, cfg.Downly.Worker.StuckJobMinutes)
+	go statsreport.Loop(ctx, logger, pool, b, cfg.Downly.Admin.StatsChannelID, cfg.Downly.Admin.StatsIntervalH)
 
 	// Health check endpoint
 	go startHealthServer(logger, pool, cfg.Downly.Worker.HealthPort)

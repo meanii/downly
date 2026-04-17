@@ -83,4 +83,50 @@ func TestContainsURL(t *testing.T) {
 	if containsURL("no urls here at all") {
 		t.Error("expected false for text without URL")
 	}
+	if !containsURL("q720:https://test.com") {
+		t.Error("expected true for quality-prefixed URL")
+	}
+	if !containsURL("audio:https://test.com") {
+		t.Error("expected true for audio-prefixed URL")
+	}
+}
+
+func TestExtractURLsWithPrefix(t *testing.T) {
+	urls := extractURLs("q720:https://youtube.com/watch?v=abc")
+	if len(urls) != 1 {
+		t.Fatalf("expected 1 URL, got %d", len(urls))
+	}
+	if urls[0] != "q720:https://youtube.com/watch?v=abc" {
+		t.Errorf("expected prefixed URL preserved, got %q", urls[0])
+	}
+
+	urls = extractURLs("audio:https://test.com")
+	if len(urls) != 1 {
+		t.Fatalf("expected 1 URL, got %d", len(urls))
+	}
+	if urls[0] != "audio:https://test.com" {
+		t.Errorf("expected audio prefix preserved, got %q", urls[0])
+	}
+}
+
+func TestStripModePrefix(t *testing.T) {
+	tests := []struct {
+		input      string
+		wantClean  string
+		wantPrefix string
+	}{
+		{"https://test.com", "https://test.com", ""},
+		{"q720:https://test.com", "https://test.com", "q720:"},
+		{"audio:https://test.com", "https://test.com", "audio:"},
+		{"q1080:https://test.com", "https://test.com", "q1080:"},
+	}
+	for _, tt := range tests {
+		clean, prefix := stripModePrefix(tt.input)
+		if clean != tt.wantClean {
+			t.Errorf("stripModePrefix(%q) clean = %q, want %q", tt.input, clean, tt.wantClean)
+		}
+		if prefix != tt.wantPrefix {
+			t.Errorf("stripModePrefix(%q) prefix = %q, want %q", tt.input, prefix, tt.wantPrefix)
+		}
+	}
 }

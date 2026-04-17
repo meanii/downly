@@ -1,16 +1,7 @@
 downly:
 
-  namespace: "production"
-  app_name: "downly"
-
   telegram:
-    api_id: ""
-    api_hash: ""
     bot_token: ""
-
-  configs:
-    owner: ""
-    channel_id: ""
 
   database:
     postgres_url: "postgresql://downly:downly@localhost:5432/downly"
@@ -28,9 +19,12 @@ downly:
     max_concurrent_per_user: 2
     rate_limit_seconds: 10
     max_retries: 1
+    daily_quota_per_user: 0  # 0 = unlimited
 
   admin:
     user_ids: []
+    stats_channel_id: 0
+    stats_interval_hours: 24
 
   cleanup:
     enabled: true

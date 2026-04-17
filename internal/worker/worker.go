@@ -61,11 +61,30 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 
 		// Choose download mode based on URL prefix marker
 		var res *downloader.Result
-		if strings.HasPrefix(job.URL, "audio:") {
-			actualURL := strings.TrimPrefix(job.URL, "audio:")
+		actualURL, mode, quality := parseJobURL(job.URL)
+		switch mode {
+		case "audio":
 			res, err = dl.DownloadAudio(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, actualURL, progressFn)
-		} else {
-			res, err = dl.Download(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, job.URL, progressFn)
+		case "quality":
+			// Cascading quality fallback: try preferred, then step down
+			chain := downloader.QualityFallbackChain(quality)
+			for i, q := range chain {
+				if i > 0 {
+					jobLog.Warn("quality fallback", "from", chain[i-1], "to", q)
+					progressFn(fmt.Sprintf("Quality %s unavailable, trying %s...", chain[i-1], q), 5)
+					cleanJobDir(cfg.Downly.Worker.WorkDir, job.ID)
+				}
+				if q == "best" {
+					res, err = dl.Download(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, actualURL, progressFn)
+				} else {
+					res, err = dl.DownloadWithQuality(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, actualURL, q, progressFn)
+				}
+				if err == nil || errors.Is(err, context.Canceled) || errors.Is(jobCtx.Err(), context.Canceled) {
+					break
+				}
+			}
+		default:
+			res, err = dl.Download(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, actualURL, progressFn)
 		}
 		controller.Unregister(job.ID)
 		cancel()
@@ -147,9 +166,10 @@ func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *d
 	switch res.Media {
 	case downloader.MediaVideo:
 		_, err := b.SendVideo(ctx, &bot.SendVideoParams{
-			ChatID:  chatID,
-			Video:   upload,
-			Caption: caption,
+			ChatID:            chatID,
+			Video:             upload,
+			Caption:           caption,
+			SupportsStreaming:  true,
 		})
 		return err
 	case downloader.MediaAudio:
@@ -265,4 +285,32 @@ func truncate(s string) string {
 		return s[:300]
 	}
 	return s
+}
+
+// cleanJobDir removes all files in a job directory for retry.
+func cleanJobDir(workDir string, jobID int64) {
+	jobDir := fmt.Sprintf("%s/job-%d", workDir, jobID)
+	entries, err := os.ReadDir(jobDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			_ = os.Remove(fmt.Sprintf("%s/%s", jobDir, entry.Name()))
+		}
+	}
+}
+
+// parseJobURL extracts mode and quality from prefixed URLs.
+// Formats: "audio:<url>", "q720:<url>", "q480:<url>", "q1080:<url>", "<url>"
+func parseJobURL(raw string) (url, mode, quality string) {
+	if strings.HasPrefix(raw, "audio:") {
+		return strings.TrimPrefix(raw, "audio:"), "audio", ""
+	}
+	for _, q := range []string{"q360:", "q480:", "q720:", "q1080:"} {
+		if strings.HasPrefix(raw, q) {
+			return strings.TrimPrefix(raw, q), "quality", strings.TrimSuffix(q, ":")
+		}
+	}
+	return raw, "default", ""
 }

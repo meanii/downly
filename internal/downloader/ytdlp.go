@@ -91,6 +91,114 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 	return nil, err
 }
 
+// qualityFormat returns the yt-dlp format string for a given quality setting.
+func qualityFormat(quality string) string {
+	switch quality {
+	case "q360":
+		return "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]/best"
+	case "q480":
+		return "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best"
+	case "q720":
+		return "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best"
+	case "q1080":
+		return "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best"
+	default:
+		return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+	}
+}
+
+// QualityFallbackChain returns the ordered list of qualities to try,
+// starting from the given quality and stepping down.
+func QualityFallbackChain(quality string) []string {
+	all := []string{"q1080", "q720", "q480", "q360"}
+	for i, q := range all {
+		if q == quality {
+			return append(all[i:], "best")
+		}
+	}
+	return []string{"best"}
+}
+
+// DownloadWithQuality downloads video at a specific quality cap.
+func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID int64, url, quality string, onProgress func(text string, percent int)) (*Result, error) {
+	logger := y.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "quality", quality)
+
+	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		return nil, err
+	}
+
+	meta := y.fetchMetadata(ctx, log, url)
+
+	outputTemplate := filepath.Join(jobDir, "%(title).120B [%(id)s].%(ext)s")
+	args := []string{
+		"--newline",
+		"--no-playlist",
+		"-f", qualityFormat(quality),
+		"--merge-output-format", "mp4",
+		"-o", outputTemplate,
+	}
+	if y.MaxFileSizeMB > 0 {
+		args = append(args, "--max-filesize", fmt.Sprintf("%dM", y.MaxFileSizeMB))
+	}
+	if y.CookiesFile != "" {
+		if _, err := os.Stat(y.CookiesFile); err == nil {
+			args = append(args, "--cookies", y.CookiesFile)
+		}
+	}
+	args = append(args, url)
+
+	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	log.Info("starting yt-dlp with quality", "format", qualityFormat(quality))
+	if onProgress != nil {
+		onProgress("Starting download ("+quality+")", 5)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	stdoutCh := make(chan []string, 1)
+	stderrCh := make(chan []string, 1)
+	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
+	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+
+	err = cmd.Wait()
+	stdoutLines := <-stdoutCh
+	stderrLines := <-stderrCh
+	combined := append(stdoutLines, stderrLines...)
+	if err != nil {
+		out := strings.TrimSpace(strings.Join(combined, "\n"))
+		return nil, fmt.Errorf("yt-dlp failed: %s", out)
+	}
+	if onProgress != nil {
+		onProgress("Finalizing file", 98)
+	}
+
+	result, findErr := findOutputFile(jobDir, meta.Platform)
+	if findErr != nil {
+		return nil, findErr
+	}
+	result.Title = meta.Title
+	result.Duration = int(meta.Duration)
+	if result.Media == MediaDocument && isVideoFile(result.FileName) {
+		result.Media = MediaVideo
+	}
+	return result, nil
+}
+
 // DownloadAudio extracts audio only and converts to mp3.
 func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, url string, onProgress func(text string, percent int)) (*Result, error) {
 	logger := y.Logger
@@ -414,6 +522,66 @@ func isImageFile(name string) bool {
 		strings.HasSuffix(lower, ".png") ||
 		strings.HasSuffix(lower, ".webp") ||
 		strings.HasSuffix(lower, ".gif")
+}
+
+
+// PlaylistEntry represents a single video in a playlist.
+type PlaylistEntry struct {
+	Title string
+	URL   string
+}
+
+type playlistJSON struct {
+	Title   string `json:"title"`
+	Entries []struct {
+		Title string `json:"title"`
+		URL   string `json:"url"`
+		ID    string `json:"id"`
+	} `json:"entries"`
+}
+
+// FetchPlaylist fetches playlist metadata and returns individual entry URLs.
+func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]PlaylistEntry, string, error) {
+	args := []string{
+		"--dump-single-json",
+		"--flat-playlist",
+		"--no-download",
+		"--playlist-end", strconv.Itoa(maxItems),
+	}
+	if y.CookiesFile != "" {
+		if _, err := os.Stat(y.CookiesFile); err == nil {
+			args = append(args, "--cookies", y.CookiesFile)
+		}
+	}
+	args = append(args, url)
+
+	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, "", fmt.Errorf("playlist fetch failed: %w", err)
+	}
+
+	var pl playlistJSON
+	if err := json.Unmarshal(out, &pl); err != nil {
+		return nil, "", fmt.Errorf("parse playlist JSON: %w", err)
+	}
+
+	var entries []PlaylistEntry
+	for _, e := range pl.Entries {
+		entryURL := e.URL
+		if entryURL == "" && e.ID != "" {
+			entryURL = "https://www.youtube.com/watch?v=" + e.ID
+		}
+		if entryURL == "" {
+			continue
+		}
+		title := e.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		entries = append(entries, PlaylistEntry{Title: title, URL: entryURL})
+	}
+	return entries, pl.Title, nil
 }
 
 func readPipe(scanner *bufio.Scanner, onProgress func(text string, percent int)) []string {
