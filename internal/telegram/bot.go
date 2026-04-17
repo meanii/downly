@@ -185,6 +185,13 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	}, func(ctx context.Context, b *bot.Bot, update *models.Update) {
 		handleInlineQuery(ctx, b, pool, cfg, handlerLog, update)
 	})
+
+	// Chosen inline result handler — queues the download when user picks a result
+	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+		return update.ChosenInlineResult != nil
+	}, func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		handleChosenInlineResult(ctx, b, pool, cfg, handlerLog, update)
+	})
 }
 
 // queueURL handles inserting a single URL job and sending the queue ack.
@@ -590,38 +597,42 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg 
 		return
 	}
 
+	botUser := getBotUsername(ctx, b)
+	shortURL := trimURL(url)
+
 	// Build results: download options
+	// The actual download is triggered by ChosenInlineResult handler, not the message text.
 	results := []models.InlineQueryResult{
 		&models.InlineQueryResultArticle{
 			ID:          "dl_best",
 			Title:       "Download (best quality)",
-			Description: trimURL(url),
+			Description: shortURL,
 			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: url,
+				MessageText: fmt.Sprintf("Downloading %s via @%s (best quality)", shortURL, botUser),
 			},
 		},
 		&models.InlineQueryResultArticle{
 			ID:          "dl_720",
 			Title:       "Download (720p)",
-			Description: trimURL(url),
+			Description: shortURL,
 			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: "q720:" + url,
+				MessageText: fmt.Sprintf("Downloading %s via @%s (720p)", shortURL, botUser),
 			},
 		},
 		&models.InlineQueryResultArticle{
 			ID:          "dl_480",
 			Title:       "Download (480p)",
-			Description: trimURL(url),
+			Description: shortURL,
 			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: "q480:" + url,
+				MessageText: fmt.Sprintf("Downloading %s via @%s (480p)", shortURL, botUser),
 			},
 		},
 		&models.InlineQueryResultArticle{
 			ID:          "dl_mp3",
 			Title:       "Download (audio only)",
-			Description: trimURL(url),
+			Description: shortURL,
 			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: "audio:" + url,
+				MessageText: fmt.Sprintf("Downloading %s via @%s (audio)", shortURL, botUser),
 			},
 		},
 	}
@@ -821,6 +832,46 @@ func handleHealth(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *conf
 		return
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatPlatformHealth(platforms, 24)})
+}
+
+func handleChosenInlineResult(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, logger *slog.Logger, update *models.Update) {
+	chosen := update.ChosenInlineResult
+	if chosen == nil {
+		return
+	}
+
+	userID := chosen.From.ID
+	chatID := userID // deliver download to user's DM
+	query := strings.TrimSpace(chosen.Query)
+
+	url := normalizeURL(query)
+	if !looksLikeURL(url) {
+		return
+	}
+
+	// Determine quality from the chosen result ID
+	var queuedURL string
+	switch chosen.ResultID {
+	case "dl_720":
+		queuedURL = "q720:" + url
+	case "dl_480":
+		queuedURL = "q480:" + url
+	case "dl_mp3":
+		queuedURL = "audio:" + url
+	default:
+		queuedURL = url
+	}
+
+	banned, _ := db.IsBanned(ctx, pool, userID)
+	if banned {
+		return
+	}
+	if !checkRateLimit(cfg, userID) {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Slow down! Please wait before sending another URL."})
+		return
+	}
+
+	queueURL(ctx, b, pool, cfg, logger.With("chat_id", chatID, "inline", true), chatID, userID, queuedURL, &models.Update{})
 }
 
 func truncateStr(s string, max int) string {
