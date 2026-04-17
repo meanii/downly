@@ -105,3 +105,30 @@ func TestProgressRE(t *testing.T) {
 		}
 	}
 }
+
+func TestQualityFormat(t *testing.T) {
+	tests := []struct {
+		quality  string
+		contains string
+	}{
+		{"q360", "height<=360"},
+		{"q480", "height<=480"},
+		{"q720", "height<=720"},
+		{"q1080", "height<=1080"},
+		{"qbest", "bestvideo[ext=mp4]"},
+		{"", "bestvideo[ext=mp4]"},
+	}
+	for _, tt := range tests {
+		got := qualityFormat(tt.quality)
+		found := false
+		for i := 0; i <= len(got)-len(tt.contains); i++ {
+			if got[i:i+len(tt.contains)] == tt.contains {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("qualityFormat(%q) = %q, expected to contain %q", tt.quality, got, tt.contains)
+		}
+	}
+}

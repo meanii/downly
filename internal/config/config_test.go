@@ -67,6 +67,9 @@ downly:
 	if cfg.Downly.Cleanup.RetentionHours != 72 {
 		t.Errorf("expected default retention hours 72, got %d", cfg.Downly.Cleanup.RetentionHours)
 	}
+	if cfg.Downly.Admin.StatsIntervalH != 24 {
+		t.Errorf("expected default stats interval 24, got %d", cfg.Downly.Admin.StatsIntervalH)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {

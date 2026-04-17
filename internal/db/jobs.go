@@ -464,6 +464,36 @@ func joinLines(lines []string) string {
 	return out
 }
 
+// --- User Preferences ---
+
+func EnsurePreferencesTable(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
+		create table if not exists user_preferences (
+			user_id bigint primary key,
+			quality text not null default 'best',
+			updated_at timestamptz not null default now()
+		)
+	`)
+	return err
+}
+
+func SetUserQuality(ctx context.Context, pool *pgxpool.Pool, userID int64, quality string) error {
+	_, err := pool.Exec(ctx, `
+		insert into user_preferences (user_id, quality, updated_at) values ($1, $2, now())
+		on conflict (user_id) do update set quality = $2, updated_at = now()
+	`, userID, quality)
+	return err
+}
+
+func GetUserQuality(ctx context.Context, pool *pgxpool.Pool, userID int64) (string, error) {
+	var quality string
+	err := pool.QueryRow(ctx, `select quality from user_preferences where user_id = $1`, userID).Scan(&quality)
+	if err != nil {
+		return "best", nil // default to best if no preference set
+	}
+	return quality, nil
+}
+
 // --- Ban / Unban ---
 
 func BanUser(ctx context.Context, pool *pgxpool.Pool, userID int64, reason string) error {
@@ -637,6 +667,76 @@ func FormatActiveJobs(jobs []Job) string {
 			line += fmt.Sprintf(" (%d%%)", job.ProgressPercent)
 		}
 		lines = append(lines, line)
+	}
+	return joinLines(lines)
+}
+
+// --- Daily Quota ---
+
+func UserDailyJobCount(ctx context.Context, pool *pgxpool.Pool, userID int64) (int, error) {
+	var count int
+	err := pool.QueryRow(ctx, `
+		select count(*) from download_jobs
+		where user_id = $1 and created_at >= now() - interval '24 hours'
+	`, userID).Scan(&count)
+	return count, err
+}
+
+// --- Platform Health ---
+
+type PlatformHealth struct {
+	Platform    string
+	Total       int
+	Succeeded   int
+	Failed      int
+	SuccessRate float64
+}
+
+func GetPlatformHealth(ctx context.Context, pool *pgxpool.Pool, hours int, limit int) ([]PlatformHealth, error) {
+	rows, err := pool.Query(ctx, `
+		select
+			platform,
+			count(*) as total,
+			count(*) filter (where status = 'done') as succeeded,
+			count(*) filter (where status = 'failed') as failed
+		from download_jobs
+		where platform != '' and created_at >= now() - make_interval(hours := $1)
+		group by platform
+		order by total desc
+		limit $2
+	`, hours, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var platforms []PlatformHealth
+	for rows.Next() {
+		var p PlatformHealth
+		if err := rows.Scan(&p.Platform, &p.Total, &p.Succeeded, &p.Failed); err != nil {
+			return nil, err
+		}
+		if p.Total > 0 {
+			p.SuccessRate = float64(p.Succeeded) / float64(p.Total) * 100
+		}
+		platforms = append(platforms, p)
+	}
+	return platforms, rows.Err()
+}
+
+func FormatPlatformHealth(platforms []PlatformHealth, hours int) string {
+	if len(platforms) == 0 {
+		return "No platform data available."
+	}
+	lines := []string{fmt.Sprintf("Platform Health (last %dh):", hours)}
+	for _, p := range platforms {
+		status := "OK"
+		if p.SuccessRate < 50 {
+			status = "FAILING"
+		} else if p.SuccessRate < 80 {
+			status = "DEGRADED"
+		}
+		lines = append(lines, fmt.Sprintf("  %s [%s] — %d/%d ok (%.0f%%)", p.Platform, status, p.Succeeded, p.Total, p.SuccessRate))
 	}
 	return joinLines(lines)
 }

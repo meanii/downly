@@ -54,10 +54,13 @@ type Limits struct {
 	MaxConcurrentPerUser int `yaml:"max_concurrent_per_user"`
 	RateLimitSeconds     int `yaml:"rate_limit_seconds"`
 	MaxRetries           int `yaml:"max_retries"`
+	DailyQuotaPerUser    int `yaml:"daily_quota_per_user"`
 }
 
 type Admin struct {
-	UserIDs []int64 `yaml:"user_ids"`
+	UserIDs        []int64 `yaml:"user_ids"`
+	StatsChannelID int64   `yaml:"stats_channel_id"`
+	StatsIntervalH int     `yaml:"stats_interval_hours"`
 }
 
 type Cleanup struct {
@@ -110,8 +113,13 @@ func Load(path string) (*Root, error) {
 	if cfg.Downly.Limits.MaxRetries <= 0 {
 		cfg.Downly.Limits.MaxRetries = 1
 	}
+	// DailyQuotaPerUser: 0 means unlimited (no default override needed)
+
 	if cfg.Downly.Cleanup.RetentionHours <= 0 {
 		cfg.Downly.Cleanup.RetentionHours = 72
+	}
+	if cfg.Downly.Admin.StatsIntervalH <= 0 {
+		cfg.Downly.Admin.StatsIntervalH = 24
 	}
 	return &cfg, nil
 }

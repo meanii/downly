@@ -111,6 +111,34 @@ func TestFormatDoneMessage(t *testing.T) {
 	}
 }
 
+func TestParseJobURL(t *testing.T) {
+	tests := []struct {
+		raw         string
+		wantURL     string
+		wantMode    string
+		wantQuality string
+	}{
+		{"https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "default", ""},
+		{"audio:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "audio", ""},
+		{"q720:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q720"},
+		{"q480:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q480"},
+		{"q1080:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q1080"},
+		{"q360:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q360"},
+	}
+	for _, tt := range tests {
+		url, mode, quality := parseJobURL(tt.raw)
+		if url != tt.wantURL {
+			t.Errorf("parseJobURL(%q) url = %q, want %q", tt.raw, url, tt.wantURL)
+		}
+		if mode != tt.wantMode {
+			t.Errorf("parseJobURL(%q) mode = %q, want %q", tt.raw, mode, tt.wantMode)
+		}
+		if quality != tt.wantQuality {
+			t.Errorf("parseJobURL(%q) quality = %q, want %q", tt.raw, quality, tt.wantQuality)
+		}
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
 }
