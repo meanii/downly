@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -172,12 +173,22 @@ func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *d
 
 	switch res.Media {
 	case downloader.MediaVideo:
-		_, err := b.SendVideo(ctx, &bot.SendVideoParams{
-			ChatID:            chatID,
-			Video:             upload,
-			Caption:           caption,
-			SupportsStreaming:  true,
-		})
+		params := &bot.SendVideoParams{
+			ChatID:           chatID,
+			Video:            upload,
+			Caption:          caption,
+			SupportsStreaming: true,
+		}
+		// Add thumbnail if available
+		if res.ThumbnailPath != "" {
+			if thumbFile, err := os.Open(res.ThumbnailPath); err == nil {
+				defer thumbFile.Close()
+				params.Thumbnail = &models.InputFileUpload{Filename: filepath.Base(res.ThumbnailPath), Data: thumbFile}
+				_, err := b.SendVideo(ctx, params)
+				return err
+			}
+		}
+		_, err := b.SendVideo(ctx, params)
 		return err
 	case downloader.MediaAudio:
 		_, err := b.SendAudio(ctx, &bot.SendAudioParams{

@@ -24,6 +24,7 @@ var qualityOptions = []struct {
 	Label    string
 	Callback string
 }{
+	{"📱 Telegram", "telegram"},
 	{"360p", "q360"},
 	{"480p", "q480"},
 	{"720p", "q720"},

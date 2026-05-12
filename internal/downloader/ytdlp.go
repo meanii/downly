@@ -34,12 +34,13 @@ const (
 )
 
 type Result struct {
-	FilePath  string
-	FileName  string
-	Platform  string
-	Media     MediaType
-	Title     string
-	Duration  int
+	FilePath      string
+	FileName      string
+	Platform      string
+	Media         MediaType
+	Title         string
+	Duration      int
+	ThumbnailPath string
 }
 
 type mediaInfo struct {
@@ -134,7 +135,7 @@ func qualityFormat(quality string) string {
 		return "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]/best"
 	case "q480":
 		return "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best"
-	case "q720":
+	case "q720", "telegram":
 		return "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best"
 	case "q1080":
 		return "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best"
@@ -146,7 +147,7 @@ func qualityFormat(quality string) string {
 // QualityFallbackChain returns the ordered list of qualities to try,
 // starting from the given quality and stepping down.
 func QualityFallbackChain(quality string) []string {
-	all := []string{"q1080", "q720", "q480", "q360"}
+	all := []string{"q1080", "q720", "telegram", "q480", "q360"}
 	for i, q := range all {
 		if q == quality {
 			return append(all[i:], "best")
@@ -229,6 +230,14 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	if findErr != nil {
 		return nil, findErr
 	}
+
+	// Download thumbnail for better video preview in Telegram
+	result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+
+	// Compress for Telegram if needed
+	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
+	result.FilePath = compressedPath
+
 	result.Title = meta.Title
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
@@ -412,6 +421,14 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	if findErr != nil {
 		return nil, findErr
 	}
+
+	// Download thumbnail for better video preview in Telegram
+	result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+
+	// Compress for Telegram if needed
+	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
+	result.FilePath = compressedPath
+
 	result.Title = meta.Title
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
@@ -476,6 +493,15 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 	if findErr != nil {
 		return nil, findErr
 	}
+
+	// Download thumbnail for video files
+	if isVideoFile(result.FileName) {
+		result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+		// Compress for Telegram if needed
+		compressedPath, _ := compressVideo(ctx, log, result.FilePath)
+		result.FilePath = compressedPath
+	}
+
 	result.Title = meta.Title
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
@@ -757,6 +783,91 @@ func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]P
 		entries = append(entries, PlaylistEntry{Title: title, URL: entryURL})
 	}
 	return entries, pl.Title, nil
+}
+
+// downloadThumbnail fetches and stores the thumbnail for a video in the job directory.
+func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) string {
+	if thumbURL == "" {
+		return ""
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, thumbURL, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	ext := "jpg"
+	ct := resp.Header.Get("Content-Type")
+	if strings.Contains(ct, "png") {
+		ext = "png"
+	} else if strings.Contains(ct, "webp") {
+		ext = "webp"
+	}
+
+	fileName := filepath.Join(jobDir, "thumbnail."+ext)
+	f, err := os.Create(fileName)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return ""
+	}
+	return fileName
+}
+
+func compressVideo(ctx context.Context, log *slog.Logger, filePath string) (string, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return filePath, err
+	}
+	sizeMB := float64(info.Size()) / 1024 / 1024
+	if sizeMB <= 150 {
+		return filePath, nil
+	}
+
+	log.Info("compressing video for telegram", "original_size_mb", sizeMB, "file", filePath)
+	outputPath := strings.TrimSuffix(filePath, ".mp4") + "_compressed.mp4"
+
+	args := []string{
+		"-i", filePath,
+		"-vf", "scale=1280:-2",
+		"-c:v", "libx264",
+		"-b:v", "1500k",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-preset", "fast",
+		"-y",
+		outputPath,
+	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Error("ffmpeg compression failed", "error", err, "output", string(out))
+		return filePath, nil
+	}
+
+	compInfo, _ := os.Stat(outputPath)
+	if compInfo != nil {
+		compSizeMB := float64(compInfo.Size()) / 1024 / 1024
+		log.Info("compression complete", "original_mb", sizeMB, "compressed_mb", compSizeMB)
+		if err := os.Remove(filePath); err != nil {
+			log.Warn("failed to remove original after compression", "error", err)
+		}
+		return outputPath, nil
+	}
+
+	return filePath, nil
 }
 
 func readPipe(scanner *bufio.Scanner, onProgress func(text string, percent int)) []string {
