@@ -174,9 +174,9 @@ func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *d
 	switch res.Media {
 	case downloader.MediaVideo:
 		params := &bot.SendVideoParams{
-			ChatID:           chatID,
-			Video:            upload,
-			Caption:          caption,
+			ChatID:            chatID,
+			Video:             upload,
+			Caption:           caption,
 			SupportsStreaming: true,
 		}
 		// Add thumbnail if available

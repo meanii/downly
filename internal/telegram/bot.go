@@ -37,7 +37,6 @@ var (
 	lastSubmit  = make(map[int64]time.Time)
 )
 
-
 const repoURL = "https://github.com/meanii/downly"
 
 func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.Controller, b *bot.Bot, pool *pgxpool.Pool) {
@@ -318,7 +317,7 @@ func startMessage(botUsername string) string {
 		"/quality <url> - choose quality for one download\n" +
 		"/playlist <url> [max] - download playlist (up to 25)\n" +
 		"/cancel <job_id> - cancel a job\n\n" +
-		"Inline mode: type @"+botUsername+" <url> in any chat.\n\n" +
+		"Inline mode: type @" + botUsername + " <url> in any chat.\n\n" +
 		"Admin commands:\n" +
 		"/stats - bot analytics\n" +
 		"/health - platform health dashboard\n" +

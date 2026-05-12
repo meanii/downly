@@ -44,16 +44,16 @@ type Result struct {
 }
 
 type mediaInfo struct {
-	Extractor       string  `json:"extractor_key"`
-	ThumbnailURL    string  `json:"thumbnail"`
-	Title           string  `json:"title"`
-	ID              string  `json:"id"`
-	Duration        float64 `json:"duration"`
-	Width           int     `json:"width"`
-	Height          int     `json:"height"`
-	Filesize        int64   `json:"filesize"`
-	FilesizeApprox  int64   `json:"filesize_approx"`
-	Platform        string  `json:"-"`
+	Extractor      string  `json:"extractor_key"`
+	ThumbnailURL   string  `json:"thumbnail"`
+	Title          string  `json:"title"`
+	ID             string  `json:"id"`
+	Duration       float64 `json:"duration"`
+	Width          int     `json:"width"`
+	Height         int     `json:"height"`
+	Filesize       int64   `json:"filesize"`
+	FilesizeApprox int64   `json:"filesize_approx"`
+	Platform       string  `json:"-"`
 }
 
 var progressRE = regexp.MustCompile(`\[download\]\s+([0-9.]+)%`)
@@ -724,7 +724,6 @@ func isImageURL(rawURL string) bool {
 	}
 	return isImageFile(path)
 }
-
 
 // PlaylistEntry represents a single video in a playlist.
 type PlaylistEntry struct {

@@ -766,12 +766,12 @@ func ReapStuckJobs(ctx context.Context, pool *pgxpool.Pool, stuckMinutes int) (i
 // --- User Bandwidth ---
 
 type UserBandwidth struct {
-	UserID      int64
-	TotalBytes  int64
-	JobCount    int
-	AvgBytes    int64
-	Platform    string
-	LastSeenAt  time.Time
+	UserID     int64
+	TotalBytes int64
+	JobCount   int
+	AvgBytes   int64
+	Platform   string
+	LastSeenAt time.Time
 }
 
 func GetUserBandwidth(ctx context.Context, pool *pgxpool.Pool, limit int) ([]UserBandwidth, error) {
@@ -826,4 +826,3 @@ func FormatUserBandwidth(users []UserBandwidth) string {
 	lines = append(lines, fmt.Sprintf("Total (top %d users): %.1fMB", len(users), totalMB))
 	return joinLines(lines)
 }
-
