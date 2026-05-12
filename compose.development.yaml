@@ -3,9 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./downloads:/app/downloads
@@ -28,10 +25,10 @@ services:
       POSTGRES_USER: downly
       POSTGRES_PASSWORD: downly
       POSTGRES_DB: downly
-    ports:
-      - "5432:5432"
-    volumes:
-      - db_data:/var/lib/postgresql/data
+    # ports:
+    #   - "5432:5432"
+    # volumes:
+    #   - db_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U downly -d downly"]
       interval: 5s

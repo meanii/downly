@@ -87,13 +87,20 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 			res, err = dl.Download(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, actualURL, progressFn)
 		}
 		controller.Unregister(job.ID)
+		// Capture whether the job context was canceled BEFORE we call cancel(),
+		// because after cancel() jobCtx.Err() is always context.Canceled regardless.
+		jobWasCanceled := jobCtx.Err() != nil
 		cancel()
 
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(jobCtx.Err(), context.Canceled) {
+			if errors.Is(err, context.Canceled) || jobWasCanceled {
 				jobLog.Warn("job canceled during processing")
-				_ = db.MarkCanceled(ctx, pool, job.ID)
-				editProgress(ctx, b, job.ChatID, int(job.TelegramMsgID), formatCanceledMessage(job.ID))
+				reason := "Canceled by user"
+				if ctx.Err() != nil {
+					reason = "Worker shutdown"
+				}
+				_ = db.MarkCanceled(ctx, pool, job.ID, reason)
+				editProgress(ctx, b, job.ChatID, int(job.TelegramMsgID), formatCanceledMessage(job.ID, reason))
 				continue
 			}
 			jobLog.Error("download failed", "error", err, "retry_count", job.RetryCount)
@@ -150,7 +157,7 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 		}
 		_ = caption // used in sendMedia
 
-		if err := db.MarkDone(ctx, pool, job.ID, res.FilePath, res.FileName, res.Platform); err != nil {
+		if err := db.MarkDone(ctx, pool, job.ID, res.FilePath, res.FileName, res.Platform, fi.Size()); err != nil {
 			jobLog.Error("mark done failed", "error", err)
 			continue
 		}
@@ -186,7 +193,23 @@ func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *d
 			Photo:   upload,
 			Caption: caption,
 		})
-		return err
+		if err == nil {
+			return nil
+		}
+		// SendPhoto can reject oversized or unsupported-format images; fall back to document.
+		if _, err2 := f.Seek(0, 0); err2 != nil {
+			return err
+		}
+		upload2 := &models.InputFileUpload{Filename: res.FileName, Data: f}
+		_, err2 := b.SendDocument(ctx, &bot.SendDocumentParams{
+			ChatID:   chatID,
+			Document: upload2,
+			Caption:  caption,
+		})
+		if err2 != nil {
+			return err // return original error
+		}
+		return nil
 	default:
 		_, err := b.SendDocument(ctx, &bot.SendDocumentParams{
 			ChatID:   chatID,
@@ -261,8 +284,8 @@ func formatFailureMessage(jobID int64, err string) string {
 	return fmt.Sprintf("Job #%d\nStatus: failed\nError: %s", jobID, err)
 }
 
-func formatCanceledMessage(jobID int64) string {
-	return fmt.Sprintf("Job #%d\nStatus: canceled", jobID)
+func formatCanceledMessage(jobID int64, reason string) string {
+	return fmt.Sprintf("Job #%d\nStatus: canceled\nReason: %s", jobID, reason)
 }
 
 func formatDoneMessage(jobID int64, res *downloader.Result) string {

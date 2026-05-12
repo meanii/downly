@@ -36,6 +36,7 @@ var (
 	lastSubmit  = make(map[int64]time.Time)
 )
 
+
 const repoURL = "https://github.com/meanii/downly"
 
 func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.Controller, b *bot.Bot, pool *pgxpool.Pool) {
@@ -55,10 +56,10 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 
 		switch {
 		case strings.HasPrefix(text, "/start"):
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: startMessage()})
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: startMessage(getBotUsername(ctx, b))})
 			return
 		case strings.HasPrefix(text, "/help"):
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: startMessage()})
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: startMessage(getBotUsername(ctx, b))})
 			return
 		case strings.HasPrefix(text, "/queue"):
 			msgLog.Info("received queue command")
@@ -89,6 +90,9 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 			return
 		case strings.HasPrefix(text, "/broadcast"):
 			handleBroadcast(ctx, b, pool, cfg, chatID, userID, text)
+			return
+		case strings.HasPrefix(text, "/bandwidth"):
+			handleBandwidth(ctx, b, pool, cfg, chatID, userID, text)
 			return
 		case strings.HasPrefix(text, "/unban"):
 			handleUnban(ctx, b, pool, cfg, chatID, userID, text)
@@ -301,7 +305,7 @@ func handleJobs(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatActiveJobs(jobs)})
 }
 
-func startMessage() string {
+func startMessage(botUsername string) string {
 	return "Send me a media URL and I will queue it for download.\n" +
 		"You can send multiple URLs in one message.\n\n" +
 		"Commands:\n" +
@@ -313,10 +317,11 @@ func startMessage() string {
 		"/quality <url> - choose quality for one download\n" +
 		"/playlist <url> [max] - download playlist (up to 25)\n" +
 		"/cancel <job_id> - cancel a job\n\n" +
-		"Inline mode: type @bot_username <url> in any chat.\n\n" +
+		"Inline mode: type @"+botUsername+" <url> in any chat.\n\n" +
 		"Admin commands:\n" +
 		"/stats - bot analytics\n" +
 		"/health - platform health dashboard\n" +
+		"/bandwidth [limit] - user bandwidth/storage report\n" +
 		"/users - list all users\n" +
 		"/jobs - active and pending jobs\n" +
 		"/promote, /demote <job_id> - change priority\n" +
@@ -528,7 +533,7 @@ func handleQualityCallback(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, 
 	url := data[idx+1:]
 
 	userID := cb.From.ID
-	chatID := cb.From.ID // callback queries come from the user directly
+	chatID := cb.From.ID
 	if cb.Message.Message != nil {
 		chatID = cb.Message.Message.Chat.ID
 	}
@@ -600,8 +605,6 @@ func handleInlineQuery(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg 
 	botUser := getBotUsername(ctx, b)
 	shortURL := trimURL(url)
 
-	// Build results: download options
-	// The actual download is triggered by ChosenInlineResult handler, not the message text.
 	results := []models.InlineQueryResult{
 		&models.InlineQueryResultArticle{
 			ID:          "dl_best",
@@ -832,6 +835,26 @@ func handleHealth(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *conf
 		return
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatPlatformHealth(platforms, 24)})
+}
+
+func handleBandwidth(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string) {
+	if !isAdmin(cfg, userID) {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
+		return
+	}
+	limit := 20
+	parts := strings.Fields(text)
+	if len(parts) > 1 {
+		if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	users, err := db.GetUserBandwidth(ctx, pool, limit)
+	if err != nil {
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load bandwidth data."})
+		return
+	}
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatUserBandwidth(users)})
 }
 
 func handleChosenInlineResult(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, logger *slog.Logger, update *models.Update) {

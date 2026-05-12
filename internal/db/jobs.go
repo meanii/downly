@@ -65,6 +65,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			telegram_message_id bigint not null default 0,
 			progress_text text not null default '',
 			progress_percent integer not null default 0,
+			file_size_bytes bigint not null default 0,
 			created_at timestamptz not null default now(),
 			started_at timestamptz,
 			finished_at timestamptz
@@ -73,6 +74,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		`alter table download_jobs add column if not exists progress_text text not null default '';`,
 		`alter table download_jobs add column if not exists progress_percent integer not null default 0;`,
 		`alter table download_jobs add column if not exists priority integer not null default 0;`,
+		`alter table download_jobs add column if not exists file_size_bytes bigint not null default 0;`,
 		`create index if not exists idx_download_jobs_status_priority_created_at on download_jobs(status, priority desc, created_at);`,
 		`
 		create table if not exists banned_users (
@@ -143,12 +145,12 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (*Job, error) {
 	return &job, nil
 }
 
-func MarkDone(ctx context.Context, pool *pgxpool.Pool, jobID int64, outputPath, outputName, platform string) error {
+func MarkDone(ctx context.Context, pool *pgxpool.Pool, jobID int64, outputPath, outputName, platform string, fileSizeBytes int64) error {
 	_, err := pool.Exec(ctx, `
 		update download_jobs
-		set status = $2, output_path = $3, output_name = $4, platform = $5, error_message = '', progress_text = $6, progress_percent = $7, finished_at = now()
+		set status = $2, output_path = $3, output_name = $4, platform = $5, error_message = '', progress_text = $6, progress_percent = $7, file_size_bytes = $8, finished_at = now()
 		where id = $1
-	`, jobID, StatusDone, outputPath, outputName, platform, "Completed", 100)
+	`, jobID, StatusDone, outputPath, outputName, platform, "Completed", 100, fileSizeBytes)
 	return err
 }
 
@@ -170,21 +172,21 @@ func MarkFailed(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg str
 	return err
 }
 
-func MarkCanceled(ctx context.Context, pool *pgxpool.Pool, jobID int64) error {
+func MarkCanceled(ctx context.Context, pool *pgxpool.Pool, jobID int64, reason string) error {
 	_, err := pool.Exec(ctx, `
 		update download_jobs
-		set status = $2, progress_text = $3, finished_at = now()
+		set status = $2, progress_text = $3, error_message = $4, finished_at = now()
 		where id = $1
-	`, jobID, StatusCanceled, "Canceled")
+	`, jobID, StatusCanceled, "Canceled", reason)
 	return err
 }
 
 func CancelPendingJob(ctx context.Context, pool *pgxpool.Pool, jobID, userID int64) (bool, error) {
 	cmd, err := pool.Exec(ctx, `
 		update download_jobs
-		set status = $3, progress_text = $4, finished_at = now()
-		where id = $1 and user_id = $2 and status = $5
-	`, jobID, userID, StatusCanceled, "Canceled", StatusPending)
+		set status = $3, progress_text = $4, error_message = $5, finished_at = now()
+		where id = $1 and user_id = $2 and status = $6
+	`, jobID, userID, StatusCanceled, "Canceled", "Canceled by user", StatusPending)
 	if err != nil {
 		return false, err
 	}
@@ -441,6 +443,9 @@ func FormatUserQueueSummary(jobs []Job) string {
 		if job.ProgressPercent > 0 {
 			line += fmt.Sprintf(" (%d%%)", job.ProgressPercent)
 		}
+		if job.Status == StatusCanceled && job.ErrorMessage != "" {
+			line += fmt.Sprintf(" | reason: %s", job.ErrorMessage)
+		}
 		lines = append(lines, line)
 	}
 	return joinLines(lines)
@@ -574,6 +579,9 @@ func FormatUserHistory(jobs []Job) string {
 		line := fmt.Sprintf("#%d | %s | %s", job.ID, status, trimURL(job.URL))
 		if job.Platform != "" {
 			line += fmt.Sprintf(" | %s", job.Platform)
+		}
+		if job.Status == StatusCanceled && job.ErrorMessage != "" {
+			line += fmt.Sprintf(" | %s", job.ErrorMessage)
 		}
 		if job.FinishedAt != nil {
 			line += fmt.Sprintf(" | %s", job.FinishedAt.Format("Jan 02 15:04"))
@@ -753,5 +761,69 @@ func ReapStuckJobs(ctx context.Context, pool *pgxpool.Pool, stuckMinutes int) (i
 		return 0, err
 	}
 	return cmd.RowsAffected(), nil
+}
+
+// --- User Bandwidth ---
+
+type UserBandwidth struct {
+	UserID      int64
+	TotalBytes  int64
+	JobCount    int
+	AvgBytes    int64
+	Platform    string
+	LastSeenAt  time.Time
+}
+
+func GetUserBandwidth(ctx context.Context, pool *pgxpool.Pool, limit int) ([]UserBandwidth, error) {
+	rows, err := pool.Query(ctx, `
+		select
+			user_id,
+			sum(file_size_bytes) as total_bytes,
+			count(*) as job_count,
+			avg(file_size_bytes)::bigint as avg_bytes,
+			max(platform) as most_recent_platform,
+			max(finished_at) as last_seen
+		from download_jobs
+		where user_id > 0 and status = 'done'
+		group by user_id
+		order by total_bytes desc
+		limit $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []UserBandwidth
+	for rows.Next() {
+		var u UserBandwidth
+		if err := rows.Scan(&u.UserID, &u.TotalBytes, &u.JobCount, &u.AvgBytes, &u.Platform, &u.LastSeenAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func FormatUserBandwidth(users []UserBandwidth) string {
+	if len(users) == 0 {
+		return "No bandwidth data available."
+	}
+	lines := []string{fmt.Sprintf("User Bandwidth Report (Top %d):", len(users))}
+	lines = append(lines, "")
+	totalBytes := int64(0)
+	for i, u := range users {
+		totalBytes += u.TotalBytes
+		mb := float64(u.TotalBytes) / 1024.0 / 1024.0
+		avgMB := float64(u.AvgBytes) / 1024.0 / 1024.0
+		lines = append(lines, fmt.Sprintf("%d. User %d | %.1fMB in %d jobs | avg %.1fMB", i+1, u.UserID, mb, u.JobCount, avgMB))
+		if u.Platform != "" && u.Platform != "unknown" {
+			lines = append(lines, fmt.Sprintf("   Platform: %s | Last: %s", u.Platform, u.LastSeenAt.Format("Jan 02 15:04")))
+		}
+	}
+	lines = append(lines, "")
+	totalMB := float64(totalBytes) / 1024.0 / 1024.0
+	lines = append(lines, fmt.Sprintf("Total (top %d users): %.1fMB", len(users), totalMB))
+	return joinLines(lines)
 }
 
