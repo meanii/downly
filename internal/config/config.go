@@ -36,9 +36,16 @@ type Worker struct {
 	MaxFileSizeMB   int64  `yaml:"max_file_size_mb"`
 	// MaxDownloadMB is the largest source we fetch and then compress to fit
 	// MaxFileSizeMB. Defaults to 4x MaxFileSizeMB.
-	MaxDownloadMB   int64 `yaml:"max_download_size_mb"`
-	StuckJobMinutes int   `yaml:"stuck_job_minutes"`
-	HealthPort      int   `yaml:"health_port"`
+	MaxDownloadMB int64 `yaml:"max_download_size_mb"`
+	// StuckJobMinutes: a processing job whose heartbeat is older than this
+	// is considered dead and is requeued (or failed when out of retries).
+	StuckJobMinutes int `yaml:"stuck_job_minutes"`
+	// JobTimeoutMinutes caps download + processing time for one attempt.
+	JobTimeoutMinutes int `yaml:"job_timeout_minutes"`
+	// ShutdownGraceSec is how long running jobs may finish after SIGTERM
+	// before they are interrupted and requeued.
+	ShutdownGraceSec int `yaml:"shutdown_grace_seconds"`
+	HealthPort       int `yaml:"health_port"`
 }
 
 type Services struct {
@@ -99,7 +106,13 @@ func Load(path string) (*Root, error) {
 		cfg.Downly.Worker.MaxDownloadMB = cfg.Downly.Worker.MaxFileSizeMB
 	}
 	if cfg.Downly.Worker.StuckJobMinutes <= 0 {
-		cfg.Downly.Worker.StuckJobMinutes = 15
+		cfg.Downly.Worker.StuckJobMinutes = 5
+	}
+	if cfg.Downly.Worker.JobTimeoutMinutes <= 0 {
+		cfg.Downly.Worker.JobTimeoutMinutes = 30
+	}
+	if cfg.Downly.Worker.ShutdownGraceSec <= 0 {
+		cfg.Downly.Worker.ShutdownGraceSec = 60
 	}
 	if cfg.Downly.Worker.HealthPort <= 0 {
 		cfg.Downly.Worker.HealthPort = 8080

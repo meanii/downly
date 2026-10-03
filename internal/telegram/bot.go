@@ -358,33 +358,30 @@ func handleCancel(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, controlle
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /cancel <job_id>"})
 		return
 	}
-	canceledPending, err := db.CancelPendingJob(ctx, pool, jobID, userID)
+	prev, err := db.CancelJob(ctx, pool, jobID, userID)
 	if err != nil {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to cancel job right now."})
 		return
 	}
-	if canceledPending {
+	switch prev {
+	case db.StatusPending:
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Canceled pending job #%d", jobID)})
-		return
+	case db.StatusProcessing:
+		// Stop it right away if it runs here; a worker in another instance
+		// notices the canceled status on its next heartbeat.
+		controller.Cancel(jobID)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Canceled running job #%d", jobID)})
+	default:
+		owns, _, err := db.OwnsJob(ctx, pool, jobID, userID)
+		switch {
+		case err != nil:
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to inspect job right now."})
+		case !owns:
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That job does not belong to you, or it does not exist."})
+		default:
+			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That job has already finished."})
+		}
 	}
-	owns, status, err := db.OwnsJob(ctx, pool, jobID, userID)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to inspect job right now."})
-		return
-	}
-	if !owns {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That job does not belong to you, or it does not exist."})
-		return
-	}
-	if status != db.StatusProcessing {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That job is not cancelable right now."})
-		return
-	}
-	if !controller.Cancel(jobID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Could not cancel the running job. It may have already finished."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Cancellation requested for running job #%d", jobID)})
 }
 
 func handlePriorityUpdate(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string, priority int) {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -110,18 +111,34 @@ func InsertJob(ctx context.Context, pool *pgxpool.Pool, j NewJob) (int64, error)
 	return jobID, err
 }
 
-func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (*Job, error) {
+// ErrNotProcessing is returned when a state change targets a job that is no
+// longer processing, e.g. because it was canceled or reaped meanwhile.
+var ErrNotProcessing = errors.New("job is no longer processing")
+
+func expectProcessing(cmd pgconn.CommandTag, err error) error {
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotProcessing
+	}
+	return nil
+}
+
+// ClaimJob atomically takes the next due pending job.
+func ClaimJob(ctx context.Context, pool *pgxpool.Pool, workerID string) (*Job, error) {
 	row := pool.QueryRow(ctx, `
 		update download_jobs
-		set status = $2, started_at = now(), progress_text = 'Starting download', progress_percent = 1
+		set status = $2, started_at = now(), heartbeat_at = now(), worker_id = $3,
+			progress_text = 'Starting download', progress_percent = 1
 		where id = (
 			select id from download_jobs
-			where status = $1
+			where status = $1 and next_attempt_at <= now()
 			order by priority desc, created_at asc
 			for update skip locked
 			limit 1
 		)
-		returning `+jobColumns, StatusPending, StatusProcessing)
+		returning `+jobColumns, StatusPending, StatusProcessing, workerID)
 	job, err := scanJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -132,52 +149,87 @@ func ClaimJob(ctx context.Context, pool *pgxpool.Pool) (*Job, error) {
 	return &job, nil
 }
 
-func MarkDone(ctx context.Context, pool *pgxpool.Pool, jobID int64, outputPath, outputName, platform string, fileSizeBytes int64) error {
-	_, err := pool.Exec(ctx, `
-		update download_jobs
-		set status = $2, output_path = $3, output_name = $4, platform = $5, error_message = '', progress_text = $6, progress_percent = $7, file_size_bytes = $8, finished_at = now()
-		where id = $1
-	`, jobID, StatusDone, outputPath, outputName, platform, "Completed", 100, fileSizeBytes)
-	return err
-}
-
-func MarkFailedForRetry(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg string) error {
-	_, err := pool.Exec(ctx, `
-		update download_jobs
-		set status = $2, error_message = $3, retry_count = retry_count + 1, progress_text = $4, started_at = null, finished_at = null
-		where id = $1
-	`, jobID, StatusPending, errMsg, "Queued (retry)")
-	return err
-}
-
-func MarkFailed(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg string) error {
-	_, err := pool.Exec(ctx, `
-		update download_jobs
-		set status = $2, error_message = $3, retry_count = retry_count + 1, progress_text = $4, finished_at = now()
-		where id = $1
-	`, jobID, StatusFailed, errMsg, "Failed")
-	return err
-}
-
-func MarkCanceled(ctx context.Context, pool *pgxpool.Pool, jobID int64, reason string) error {
-	_, err := pool.Exec(ctx, `
-		update download_jobs
-		set status = $2, progress_text = $3, error_message = $4, finished_at = now()
-		where id = $1
-	`, jobID, StatusCanceled, "Canceled", reason)
-	return err
-}
-
-func CancelPendingJob(ctx context.Context, pool *pgxpool.Pool, jobID, userID int64) (bool, error) {
-	cmd, err := pool.Exec(ctx, `
-		update download_jobs
-		set status = $3, progress_text = $4, error_message = $5, finished_at = now()
-		where id = $1 and user_id = $2 and status = $6
-	`, jobID, userID, StatusCanceled, "Canceled", "Canceled by user", StatusPending)
+// Heartbeat marks a processing job as alive. It reports false if the job is
+// no longer processing (canceled elsewhere or reaped), so the worker can stop.
+func Heartbeat(ctx context.Context, pool *pgxpool.Pool, jobID int64) (bool, error) {
+	cmd, err := pool.Exec(ctx, `update download_jobs set heartbeat_at = now() where id = $1 and status = $2`, jobID, StatusProcessing)
 	if err != nil {
 		return false, err
 	}
 	return cmd.RowsAffected() > 0, nil
+}
+
+func MarkDone(ctx context.Context, pool *pgxpool.Pool, jobID int64, outputPath, outputName, platform string, fileSizeBytes int64) error {
+	return expectProcessing(pool.Exec(ctx, `
+		update download_jobs
+		set status = $2, output_path = $3, output_name = $4, platform = $5, error_message = '', progress_text = 'Completed',
+			progress_percent = 100, file_size_bytes = $6, finished_at = now()
+		where id = $1 and status = $7
+	`, jobID, StatusDone, outputPath, outputName, platform, fileSizeBytes, StatusProcessing))
+}
+
+// MarkFailedForRetry puts a processing job back in the queue, due after delay.
+func MarkFailedForRetry(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg string, delay time.Duration) error {
+	return expectProcessing(pool.Exec(ctx, `
+		update download_jobs
+		set status = $2, error_message = $3, retry_count = retry_count + 1, progress_text = 'Queued (retry)',
+			started_at = null, finished_at = null, heartbeat_at = null,
+			next_attempt_at = now() + make_interval(secs => $4)
+		where id = $1 and status = $5
+	`, jobID, StatusPending, errMsg, delay.Seconds(), StatusProcessing))
+}
+
+// RequeueJob returns a processing job to the queue without counting a retry,
+// e.g. when the worker is shutting down.
+func RequeueJob(ctx context.Context, pool *pgxpool.Pool, jobID int64, reason string) error {
+	return expectProcessing(pool.Exec(ctx, `
+		update download_jobs
+		set status = $2, progress_text = $3, progress_percent = 0, started_at = null, heartbeat_at = null,
+			next_attempt_at = now()
+		where id = $1 and status = $4
+	`, jobID, StatusPending, reason, StatusProcessing))
+}
+
+func MarkFailed(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg string) error {
+	return expectProcessing(pool.Exec(ctx, `
+		update download_jobs
+		set status = $2, error_message = $3, progress_text = 'Failed', finished_at = now()
+		where id = $1 and status = $4
+	`, jobID, StatusFailed, errMsg, StatusProcessing))
+}
+
+func MarkCanceled(ctx context.Context, pool *pgxpool.Pool, jobID int64, reason string) error {
+	return expectProcessing(pool.Exec(ctx, `
+		update download_jobs
+		set status = $2, progress_text = 'Canceled', error_message = $3, finished_at = now()
+		where id = $1 and status = $4
+	`, jobID, StatusCanceled, reason, StatusProcessing))
+}
+
+// CancelJob cancels a user's pending or processing job. It returns the
+// status the job had (pending or processing), or "" if nothing was canceled.
+// A processing job's worker notices on its next heartbeat, even if it runs
+// in another instance.
+func CancelJob(ctx context.Context, pool *pgxpool.Pool, jobID, userID int64) (JobStatus, error) {
+	var prev JobStatus
+	err := pool.QueryRow(ctx, `
+		update download_jobs d
+		set status = $3, progress_text = 'Canceled', error_message = 'Canceled by user', finished_at = now()
+		from (select id, status from download_jobs where id = $1 for update) old
+		where d.id = old.id and d.user_id = $2 and d.status in ($4, $5)
+		returning old.status
+	`, jobID, userID, StatusCanceled, StatusPending, StatusProcessing).Scan(&prev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return prev, err
+}
+
+// GetJobStatus returns a job's current status.
+func GetJobStatus(ctx context.Context, pool *pgxpool.Pool, jobID int64) (JobStatus, error) {
+	var st JobStatus
+	err := pool.QueryRow(ctx, `select status from download_jobs where id = $1`, jobID).Scan(&st)
+	return st, err
 }
 
 func OwnsJob(ctx context.Context, pool *pgxpool.Pool, jobID, userID int64) (bool, JobStatus, error) {
@@ -292,16 +344,44 @@ func UserDailyJobCount(ctx context.Context, pool *pgxpool.Pool, userID int64) (i
 	return count, err
 }
 
-func ReapStuckJobs(ctx context.Context, pool *pgxpool.Pool, stuckMinutes int) (int64, error) {
-	cmd, err := pool.Exec(ctx, `
-		update download_jobs
-		set status = $1, error_message = 'Worker timeout: job stuck in processing', progress_text = 'Reaped', finished_at = now()
-		where status = $2 and started_at < now() - make_interval(mins := $3)
-	`, StatusFailed, StatusProcessing, stuckMinutes)
+// ReapStuckJobs recovers processing jobs whose worker stopped sending
+// heartbeats (crash, OOM kill, lost connection). Jobs with retries left go
+// back to the queue; the rest are failed.
+func ReapStuckJobs(ctx context.Context, pool *pgxpool.Pool, staleAfter time.Duration, maxRetries int) (requeued, failed int64, err error) {
+	rows, err := pool.Query(ctx, `
+		update download_jobs d
+		set status = case when d.retry_count < $3 then 'pending' else 'failed' end,
+			retry_count = d.retry_count + 1,
+			started_at = case when d.retry_count < $3 then null else d.started_at end,
+			finished_at = case when d.retry_count < $3 then null else now() end,
+			heartbeat_at = null,
+			next_attempt_at = now(),
+			progress_text = case when d.retry_count < $3 then 'Queued (recovered)' else 'Failed' end,
+			error_message = 'Worker stopped responding'
+		from (
+			select id from download_jobs
+			where status = $1 and coalesce(heartbeat_at, started_at, created_at) < now() - make_interval(secs => $2)
+			for update skip locked
+		) stale
+		where d.id = stale.id
+		returning d.status
+	`, StatusProcessing, staleAfter.Seconds(), maxRetries)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return cmd.RowsAffected(), nil
+	defer rows.Close()
+	for rows.Next() {
+		var st JobStatus
+		if err := rows.Scan(&st); err != nil {
+			return requeued, failed, err
+		}
+		if st == StatusPending {
+			requeued++
+		} else {
+			failed++
+		}
+	}
+	return requeued, failed, rows.Err()
 }
 
 // PruneJobs deletes finished jobs older than the retention window and folds

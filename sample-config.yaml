@@ -12,7 +12,9 @@ downly:
     work_dir: "./tmp"
     max_file_size_mb: 50        # Telegram Bot API upload limit
     max_download_size_mb: 200   # larger videos are compressed to fit max_file_size_mb
-    stuck_job_minutes: 15
+    stuck_job_minutes: 5         # requeue jobs whose worker stopped heartbeating this long
+    job_timeout_minutes: 30      # max time for one download attempt
+    shutdown_grace_seconds: 60   # let running jobs finish on SIGTERM before requeueing
     health_port: 8080
 
   limits:

@@ -12,6 +12,9 @@ services:
       - ./tmp:/app/tmp
       - ./cookies:/app/cookies
     restart: unless-stopped
+    # Must exceed worker.shutdown_grace_seconds so running jobs can finish
+    # or be requeued before Docker sends SIGKILL.
+    stop_grace_period: 90s
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 30s
