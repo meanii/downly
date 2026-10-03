@@ -127,18 +127,28 @@ func expectProcessing(cmd pgconn.CommandTag, err error) error {
 
 // ClaimJob atomically takes the next due pending job.
 func ClaimJob(ctx context.Context, pool *pgxpool.Pool, workerID string) (*Job, error) {
+	return ClaimJobLimited(ctx, pool, workerID, 0)
+}
+
+// ClaimJobLimited is ClaimJob, skipping users who already have maxPerUser
+// jobs processing (0 = no cap). Two workers claiming at the same instant can
+// overshoot the cap by one; that is accepted to keep claims lock-free.
+func ClaimJobLimited(ctx context.Context, pool *pgxpool.Pool, workerID string, maxPerUser int) (*Job, error) {
 	row := pool.QueryRow(ctx, `
 		update download_jobs
 		set status = $2, started_at = now(), heartbeat_at = now(), worker_id = $3,
 			progress_text = 'Starting download', progress_percent = 1
 		where id = (
-			select id from download_jobs
-			where status = $1 and next_attempt_at <= now()
-			order by priority desc, created_at asc
+			select d.id from download_jobs d
+			where d.status = $1 and d.next_attempt_at <= now()
+			and ($4 <= 0 or (
+				select count(*) from download_jobs p where p.user_id = d.user_id and p.status = $2
+			) < $4)
+			order by d.priority desc, d.created_at asc
 			for update skip locked
 			limit 1
 		)
-		returning `+jobColumns, StatusPending, StatusProcessing, workerID)
+		returning `+jobColumns, StatusPending, StatusProcessing, workerID, maxPerUser)
 	job, err := scanJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

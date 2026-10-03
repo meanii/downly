@@ -70,7 +70,7 @@ func (w *Worker) Run(claimCtx, workCtx context.Context) {
 		if w.Waker != nil {
 			wake = w.Waker.C()
 		}
-		job, err := db.ClaimJob(claimCtx, w.Pool, w.ID)
+		job, err := db.ClaimJobLimited(claimCtx, w.Pool, w.ID, w.Cfg.Downly.Limits.MaxConcurrentPerUser)
 		if err != nil {
 			if claimCtx.Err() == nil {
 				log.Error("claim job failed", "error", err)

@@ -2,12 +2,14 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -33,902 +35,274 @@ var qualityOptions = []struct {
 	{"Best", "qbest"},
 }
 
-var (
-	rateLimitMu sync.Mutex
-	lastSubmit  = make(map[int64]time.Time)
-)
-
 const repoURL = "https://github.com/meanii/downly"
 
-func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.Controller, b *bot.Bot, pool *pgxpool.Pool) {
-	handlerLog := logger.With("component", "telegram")
-	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypeContains, func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		if update.Message == nil || update.Message.Text == "" {
-			return
-		}
+// maxMessageLen is Telegram's limit for a text message.
+const maxMessageLen = 4096
 
-		text := strings.TrimSpace(update.Message.Text)
-		chatID := update.Message.Chat.ID
-		userID := int64(0)
-		if update.Message.From != nil {
-			userID = update.Message.From.ID
-		}
-		msgLog := handlerLog.With("chat_id", chatID, "user_id", userID)
-
-		switch {
-		case strings.HasPrefix(text, "/start"):
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: startMessage(getBotUsername(ctx, b))})
-			return
-		case strings.HasPrefix(text, "/help"):
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: startMessage(getBotUsername(ctx, b))})
-			return
-		case strings.HasPrefix(text, "/queue"):
-			msgLog.Info("received queue command")
-			jobs, err := db.GetUserJobs(ctx, pool, userID, 10)
-			if err != nil {
-				msgLog.Error("list user jobs failed", "error", err)
-				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load your queue right now."})
-				return
-			}
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatUserQueueSummary(jobs)})
-			return
-		case strings.HasPrefix(text, "/cancel"):
-			msgLog.Info("received cancel command", "text", text)
-			handleCancel(ctx, b, pool, controller, chatID, userID, text)
-			return
-		case strings.HasPrefix(text, "/promote"):
-			handlePriorityUpdate(ctx, b, pool, cfg, chatID, userID, text, 10)
-			return
-		case strings.HasPrefix(text, "/demote"):
-			handlePriorityUpdate(ctx, b, pool, cfg, chatID, userID, text, 0)
-			return
-		case strings.HasPrefix(text, "/stats"):
-			if !isAdmin(cfg, userID) {
-				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-				return
-			}
-			handleStats(ctx, b, pool, chatID)
-			return
-		case strings.HasPrefix(text, "/broadcast"):
-			handleBroadcast(ctx, b, pool, cfg, chatID, userID, text)
-			return
-		case strings.HasPrefix(text, "/bandwidth"):
-			handleBandwidth(ctx, b, pool, cfg, chatID, userID, text)
-			return
-		case strings.HasPrefix(text, "/unban"):
-			handleUnban(ctx, b, pool, cfg, chatID, userID, text)
-			return
-		case strings.HasPrefix(text, "/ban"):
-			handleBan(ctx, b, pool, cfg, chatID, userID, text)
-			return
-		case strings.HasPrefix(text, "/history"):
-			handleHistory(ctx, b, pool, chatID, userID)
-			return
-		case strings.HasPrefix(text, "/users"):
-			handleUsers(ctx, b, pool, cfg, chatID, userID)
-			return
-		case strings.HasPrefix(text, "/jobs"):
-			handleJobs(ctx, b, pool, cfg, chatID, userID)
-			return
-		case strings.HasPrefix(text, "/mp3"):
-			msgLog.Info("received mp3 command")
-			handleMP3(ctx, b, pool, cfg, chatID, userID, text, update)
-			return
-		case strings.HasPrefix(text, "/setquality"):
-			handleSetQuality(ctx, b, pool, chatID, userID)
-			return
-		case strings.HasPrefix(text, "/quality"):
-			handleQuality(ctx, b, chatID, text)
-			return
-		case strings.HasPrefix(text, "/playlist"):
-			msgLog.Info("received playlist command")
-			handlePlaylist(ctx, b, pool, cfg, chatID, userID, text, update, msgLog)
-			return
-		case strings.HasPrefix(text, "/health"):
-			handleHealth(ctx, b, pool, cfg, chatID, userID)
-			return
-		case strings.HasPrefix(text, "/priority"):
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Priority queue exists. Admins can use /promote <job_id> and /demote <job_id>."})
-			return
-		case strings.HasPrefix(text, "/") || !containsURL(text):
-			msgLog.Info("ignored unsupported message")
-			return
-		}
-
-		// Extract all URLs from the message (supports quality/audio prefixed URLs)
-		urls := extractURLs(text)
-		if len(urls) == 0 {
-			return
-		}
-
-		// Ban check
-		banned, err := db.IsBanned(ctx, pool, userID)
-		if err != nil {
-			msgLog.Error("ban check failed", "error", err)
-		}
-		if banned {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "You are banned from using this bot."})
-			return
-		}
-
-		// Rate limit
-		if !checkRateLimit(cfg, userID) {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Slow down! Please wait before sending another URL."})
-			return
-		}
-
-		for _, url := range urls {
-			// Apply user's quality preference if no explicit prefix
-			_, prefix := stripModePrefix(url)
-			if prefix == "" {
-				userQuality, _ := db.GetUserQuality(ctx, pool, userID)
-				if downloader.ValidQuality(userQuality) && userQuality != "best" && userQuality != "qbest" {
-					url = userQuality + ":" + url
-				}
-			}
-			queueURL(ctx, b, pool, cfg, msgLog, chatID, userID, url, update)
-		}
-	})
-
-	// Callback query handler for quality selection buttons
-	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
-		return update.CallbackQuery != nil && strings.HasPrefix(update.CallbackQuery.Data, "dl:")
-	}, func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		handleQualityCallback(ctx, b, pool, cfg, handlerLog, update)
-	})
-
-	// Callback handler for /setquality preference picker
-	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
-		return update.CallbackQuery != nil && strings.HasPrefix(update.CallbackQuery.Data, "sq:")
-	}, func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		handleSetQualityCallback(ctx, b, pool, update)
-	})
-
-	// Inline query handler — lets users type @bot <url> in any chat
-	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
-		return update.InlineQuery != nil
-	}, func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		handleInlineQuery(ctx, b, pool, cfg, handlerLog, update)
-	})
-
-	// Chosen inline result handler — queues the download when user picks a result
-	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
-		return update.ChosenInlineResult != nil
-	}, func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		handleChosenInlineResult(ctx, b, pool, cfg, handlerLog, update)
-	})
+// handler bundles what every update handler needs.
+type handler struct {
+	log        *slog.Logger
+	cfg        *config.Root
+	controller *worker.Controller
+	b          *bot.Bot
+	pool       *pgxpool.Pool
+	limiter    *rateLimiter
+	commands   map[string]commandFunc
 }
 
-// queueURL handles inserting a single URL job and sending the queue ack.
-func queueURL(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, msgLog *slog.Logger, chatID, userID int64, url string, update *models.Update) {
-	if !isQueueableURL(url) {
-		msgLog.Warn("rejected unsafe url", "url", url)
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That URL is not supported."})
+// commandFunc handles "/name args". msg is the original message.
+type commandFunc func(ctx context.Context, msg *models.Message, args string)
+
+func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.Controller, b *bot.Bot, pool *pgxpool.Pool) {
+	h := &handler{
+		log:        logger.With("component", "telegram"),
+		cfg:        cfg,
+		controller: controller,
+		b:          b,
+		pool:       pool,
+		limiter:    newRateLimiter(time.Duration(cfg.Downly.Limits.RateLimitSeconds) * time.Second),
+	}
+	h.commands = h.commandTable()
+
+	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypeContains, h.onMessage)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "dl:")
+	}, h.onQualityCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "sq:")
+	}, h.onSetQualityCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
+}
+
+func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Update) {
+	msg := update.Message
+	if msg == nil || msg.Text == "" || msg.From == nil || msg.From.IsBot {
+		return
+	}
+	text := strings.TrimSpace(msg.Text)
+
+	if strings.HasPrefix(text, "/") {
+		name, args, ok := parseCommand(text, getBotUsername(ctx, b))
+		if !ok {
+			return // addressed to another bot
+		}
+		if cmd, found := h.commands[name]; found {
+			h.log.Info("command", "command", name, "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
+			cmd(ctx, msg, args)
+		}
 		return
 	}
 
-	// Daily quota check
-	if quota := cfg.Downly.Limits.DailyQuotaPerUser; quota > 0 && !isAdmin(cfg, userID) {
-		dailyCount, qErr := db.UserDailyJobCount(ctx, pool, userID)
-		if qErr != nil {
-			msgLog.Error("daily quota check failed", "error", qErr)
+	urls := extractURLs(text)
+	if len(urls) == 0 {
+		return
+	}
+	chatID, userID := msg.Chat.ID, msg.From.ID
+	if !h.allowSubmit(ctx, chatID, userID) {
+		return
+	}
+	quality := h.preferredQuality(ctx, userID)
+	for _, url := range urls {
+		// Apply the user's quality preference if no explicit prefix
+		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
+			url = quality + ":" + url
 		}
-		if dailyCount >= quota {
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Daily limit reached (%d/%d). Try again tomorrow.", dailyCount, quota)})
+		if _, err := h.enqueue(ctx, chatID, userID, url); err != nil {
+			// Limit and validation errors were already reported; stop on the
+			// first so a long list does not produce a wall of errors.
 			return
 		}
 	}
+}
 
-	queued, processing, err := db.UserActiveCounts(ctx, pool, userID)
+// parseCommand splits "/name@bot args" into ("name", "args"). ok is false
+// if the command is addressed to a different bot.
+func parseCommand(text, botUsername string) (name, args string, ok bool) {
+	if !strings.HasPrefix(text, "/") {
+		return "", "", false
+	}
+	head, rest := text, ""
+	if i := strings.IndexFunc(text, unicode.IsSpace); i >= 0 {
+		head, rest = text[:i], text[i:]
+	}
+	name = head[1:]
+	if at := strings.IndexByte(name, '@'); at >= 0 {
+		target := name[at+1:]
+		name = name[:at]
+		if botUsername != "" && !strings.EqualFold(target, botUsername) {
+			return "", "", false
+		}
+	}
+	if name == "" {
+		return "", "", false
+	}
+	return strings.ToLower(name), strings.TrimSpace(rest), true
+}
+
+// reply sends text, logging failures and noting users who blocked the bot.
+func (h *handler) reply(ctx context.Context, chatID int64, text string) {
+	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
+		h.log.Warn("send message failed", "chat_id", chatID, "error", err)
+	}
+}
+
+func (h *handler) send(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error) {
+	params.Text = truncateRunes(params.Text, maxMessageLen)
+	m, err := h.b.SendMessage(ctx, params)
+	if errors.Is(err, bot.ErrorForbidden) {
+		if chatID, ok := params.ChatID.(int64); ok {
+			if dbErr := db.MarkUserBlocked(ctx, h.pool, chatID); dbErr != nil {
+				h.log.Warn("mark user blocked failed", "chat_id", chatID, "error", dbErr)
+			}
+		}
+	}
+	return m, err
+}
+
+func (h *handler) edit(ctx context.Context, chatID int64, messageID int, text string) {
+	_, err := h.b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: messageID, Text: truncateRunes(text, maxMessageLen)})
+	if err != nil && !strings.Contains(err.Error(), "message is not modified") {
+		h.log.Warn("edit message failed", "chat_id", chatID, "message_id", messageID, "error", err)
+	}
+}
+
+func (h *handler) answerCallback(ctx context.Context, id, text string) {
+	if _, err := h.b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: id, Text: text}); err != nil {
+		h.log.Warn("answer callback failed", "error", err)
+	}
+}
+
+// allowSubmit applies the ban check and rate limit to a new download request,
+// telling the user when they are refused.
+func (h *handler) allowSubmit(ctx context.Context, chatID, userID int64) bool {
+	banned, err := db.IsBanned(ctx, h.pool, userID)
 	if err != nil {
-		msgLog.Error("user active counts failed", "error", err)
+		// Fail open: a DB hiccup shouldn't lock everyone out.
+		h.log.Error("ban check failed", "user_id", userID, "error", err)
 	}
-	if queued >= cfg.Downly.Limits.MaxQueuedPerUser {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Queue limit reached. You already have %d pending jobs.", queued)})
-		return
+	if banned {
+		h.reply(ctx, chatID, "You are banned from using this bot.")
+		return false
 	}
-	if processing >= cfg.Downly.Limits.MaxConcurrentPerUser {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("You already have %d running jobs. Wait a bit or cancel one with /cancel <job_id>.", processing)})
-		return
+	if !h.limiter.Allow(userID) {
+		h.reply(ctx, chatID, "Slow down! Please wait before sending another URL.")
+		return false
+	}
+	return true
+}
+
+// preferredQuality returns the user's saved quality prefix ("q720"), or "".
+func (h *handler) preferredQuality(ctx context.Context, userID int64) string {
+	q, err := db.GetUserQuality(ctx, h.pool, userID)
+	if err != nil {
+		h.log.Warn("load quality preference failed", "user_id", userID, "error", err)
+	}
+	if downloader.ValidQuality(q) && q != "best" && q != "qbest" {
+		return q
+	}
+	return ""
+}
+
+func (h *handler) limitsFor(userID int64) db.EnqueueLimits {
+	lim := db.EnqueueLimits{MaxQueued: h.cfg.Downly.Limits.MaxQueuedPerUser}
+	if !isAdmin(h.cfg, userID) {
+		lim.DailyQuota = h.cfg.Downly.Limits.DailyQuotaPerUser
+	}
+	return lim
+}
+
+func limitMessage(le *db.LimitError) string {
+	switch le.Kind {
+	case db.LimitDaily:
+		return fmt.Sprintf("Daily limit reached (%d/%d). Try again tomorrow.", le.Count, le.Limit)
+	default:
+		return fmt.Sprintf("Queue limit reached. You already have %d pending jobs. Wait for some to finish or /cancel one.", le.Count)
+	}
+}
+
+// enqueue validates url (optionally mode-prefixed), inserts a job within the
+// user's limits and posts the status message the worker will keep updated.
+// Every failure is reported to the user before returning.
+func (h *handler) enqueue(ctx context.Context, chatID, userID int64, url string) (int64, error) {
+	log := h.log.With("chat_id", chatID, "user_id", userID)
+	if !isQueueableURL(url) {
+		log.Warn("rejected unsafe url", "url", url)
+		h.reply(ctx, chatID, "That URL is not supported.")
+		return 0, safeurl.ErrInvalidURL
 	}
 
-	priority := detectPriority(cfg, update)
-	msgLog.Info("queueing url", "url", url, "priority", priority)
-	reply, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Queueing your download..."})
+	priority := 0
+	if isAdmin(h.cfg, userID) {
+		priority = 1
+	}
+	reply, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Queueing your download..."})
 	if err != nil {
-		msgLog.Error("send queue ack failed", "error", err)
-		return
+		log.Error("send queue ack failed", "error", err)
+		return 0, err
 	}
 
 	cleanURL, mode, quality := jobSpec(url)
-	jobID, err := db.InsertJob(ctx, pool, db.NewJob{
+	jobID, err := db.EnqueueJob(ctx, h.pool, db.NewJob{
 		ChatID: chatID, UserID: userID, URL: cleanURL, Mode: mode, Quality: quality,
 		TelegramMsgID: int64(reply.ID), Priority: priority,
-	})
+	}, h.limitsFor(userID))
+	if le, ok := db.IsLimit(err); ok {
+		h.edit(ctx, chatID, reply.ID, limitMessage(le))
+		return 0, err
+	}
 	if err != nil {
-		msgLog.Error("insert job failed", "error", err)
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: reply.ID, Text: "Failed to queue this request."})
-		return
+		log.Error("insert job failed", "error", err)
+		h.edit(ctx, chatID, reply.ID, "Failed to queue this request. Please try again.")
+		return 0, err
 	}
 
-	stats, err := db.GetQueueStats(ctx, pool, jobID, userID)
+	stats, err := db.GetQueueStats(ctx, h.pool, jobID, userID)
 	if err != nil {
-		msgLog.Error("get queue stats failed", "job_id", jobID, "error", err)
+		log.Error("get queue stats failed", "job_id", jobID, "error", err)
+		stats = &db.QueueStats{}
 	}
-
-	textOut := fmt.Sprintf("Job #%d queued\nPosition ahead: %d\nActive downloads: %d\nYour active jobs: %d", jobID, safePendingAhead(stats), safeActive(stats), safeUserPending(stats))
+	textOut := fmt.Sprintf("Job #%d queued\nPosition ahead: %d\nActive downloads: %d\nYour active jobs: %d", jobID, stats.PendingAhead, stats.Active, stats.UserPending)
 	if priority > 0 {
 		textOut += fmt.Sprintf("\nPriority: %d", priority)
 	}
-	_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: reply.ID, Text: textOut})
-	msgLog.Info("job queued", "job_id", jobID, "telegram_message_id", reply.ID)
+	h.edit(ctx, chatID, reply.ID, textOut)
+	log.Info("job queued", "job_id", jobID, "url", cleanURL, "mode", mode, "quality", quality, "telegram_message_id", reply.ID)
+	return jobID, nil
 }
 
-func handleMP3(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string, update *models.Update) {
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /mp3 <url>"})
-		return
-	}
-	url := normalizeURL(parts[1])
-	if !looksLikeURL(url) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Invalid URL."})
-		return
-	}
-
-	banned, _ := db.IsBanned(ctx, pool, userID)
-	if banned {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "You are banned from using this bot."})
-		return
-	}
-	if !checkRateLimit(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Slow down! Please wait before sending another URL."})
-		return
-	}
-
-	// Prefix with "audio:" so the worker knows to extract audio
-	queueURL(ctx, b, pool, cfg, slog.Default().With("component", "telegram", "chat_id", chatID), chatID, userID, "audio:"+url, update)
+// rateLimiter enforces a per-user cooldown between submissions. Memory is
+// bounded: entries older than the cooldown are pruned as the map grows.
+type rateLimiter struct {
+	mu       sync.Mutex
+	cooldown time.Duration
+	last     map[int64]time.Time
+	now      func() time.Time
 }
 
-func handleUsers(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	users, err := db.GetAllUsers(ctx, pool, 25)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load user list."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatUserList(users)})
+const rateLimiterPruneAt = 1024
+
+func newRateLimiter(cooldown time.Duration) *rateLimiter {
+	return &rateLimiter{cooldown: cooldown, last: make(map[int64]time.Time), now: time.Now}
 }
 
-func handleJobs(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
+func (r *rateLimiter) Allow(userID int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if t, ok := r.last[userID]; ok && now.Sub(t) < r.cooldown {
+		return false
 	}
-	jobs, err := db.GetActiveJobs(ctx, pool, 20)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load job list."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatActiveJobs(jobs)})
-}
-
-func startMessage(botUsername string) string {
-	return "Send me a media URL and I will queue it for download.\n" +
-		"You can send multiple URLs in one message.\n\n" +
-		"Commands:\n" +
-		"/start, /help - show usage\n" +
-		"/queue - show your active jobs\n" +
-		"/history - show past downloads\n" +
-		"/mp3 <url> - extract audio only\n" +
-		"/setquality - set your preferred video quality\n" +
-		"/quality <url> - choose quality for one download\n" +
-		"/playlist <url> [max] - download playlist (up to 25)\n" +
-		"/cancel <job_id> - cancel a job\n\n" +
-		"Inline mode: type @" + botUsername + " <url> in any chat.\n\n" +
-		"Admin commands:\n" +
-		"/stats - bot analytics\n" +
-		"/health - platform health dashboard\n" +
-		"/bandwidth [limit] - user bandwidth/storage report\n" +
-		"/users - list all users\n" +
-		"/jobs - active and pending jobs\n" +
-		"/promote, /demote <job_id> - change priority\n" +
-		"/broadcast <msg> - message all users\n" +
-		"/ban, /unban <user_id> - block/unblock user\n\n" +
-		"Repo: " + repoURL
-}
-
-func handleStats(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, chatID int64) {
-	stats, err := db.GetBotStats(ctx, pool)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load stats."})
-		return
-	}
-	topUsers, _ := db.GetTopUsers(ctx, pool, 5)
-	topPlatforms, _ := db.GetTopPlatforms(ctx, pool, 5)
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatBotStats(stats, topUsers, topPlatforms)})
-}
-
-func handleCancel(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, controller *worker.Controller, chatID, userID int64, text string) {
-	jobID, ok := parseJobID(text)
-	if !ok {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /cancel <job_id>"})
-		return
-	}
-	prev, err := db.CancelJob(ctx, pool, jobID, userID)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to cancel job right now."})
-		return
-	}
-	switch prev {
-	case db.StatusPending:
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Canceled pending job #%d", jobID)})
-	case db.StatusProcessing:
-		// Stop it right away if it runs here; a worker in another instance
-		// notices the canceled status on its next heartbeat.
-		controller.Cancel(jobID)
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Canceled running job #%d", jobID)})
-	default:
-		owns, _, err := db.OwnsJob(ctx, pool, jobID, userID)
-		switch {
-		case err != nil:
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to inspect job right now."})
-		case !owns:
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That job does not belong to you, or it does not exist."})
-		default:
-			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That job has already finished."})
-		}
-	}
-}
-
-func handlePriorityUpdate(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string, priority int) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	jobID, ok := parseJobID(text)
-	if !ok {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /promote <job_id> or /demote <job_id>"})
-		return
-	}
-	updated, err := db.UpdatePriority(ctx, pool, jobID, priority)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to update priority right now."})
-		return
-	}
-	if !updated {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Only pending jobs can have priority changed."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Updated priority for job #%d to %d", jobID, priority)})
-}
-
-func handleBroadcast(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	msg := strings.TrimSpace(strings.TrimPrefix(text, "/broadcast"))
-	if msg == "" {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /broadcast <message>"})
-		return
-	}
-	chatIDs, err := db.GetAllChatIDs(ctx, pool)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to fetch user list."})
-		return
-	}
-	sent, failed := 0, 0
-	for _, cid := range chatIDs {
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: cid, Text: "[Broadcast] " + msg})
-		if err != nil {
-			failed++
-		} else {
-			sent++
-		}
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Broadcast done. Sent: %d, Failed: %d", sent, failed)})
-}
-
-func handleBan(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /ban <user_id> [reason]"})
-		return
-	}
-	targetID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Invalid user ID."})
-		return
-	}
-	reason := ""
-	if len(parts) > 2 {
-		reason = strings.Join(parts[2:], " ")
-	}
-	if err := db.BanUser(ctx, pool, targetID, reason); err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to ban user."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Banned user %d.", targetID)})
-}
-
-func handleUnban(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /unban <user_id>"})
-		return
-	}
-	targetID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Invalid user ID."})
-		return
-	}
-	removed, err := db.UnbanUser(ctx, pool, targetID)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to unban user."})
-		return
-	}
-	if !removed {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "User was not banned."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Unbanned user %d.", targetID)})
-}
-
-func handleHistory(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, chatID, userID int64) {
-	jobs, err := db.GetUserHistory(ctx, pool, userID, 15)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load history."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatUserHistory(jobs)})
-}
-
-func handleQuality(ctx context.Context, b *bot.Bot, chatID int64, text string) {
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /quality <url>\nI will ask you to pick a resolution before downloading."})
-		return
-	}
-	url := normalizeURL(parts[1])
-	if !looksLikeURL(url) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Invalid URL."})
-		return
-	}
-
-	// Build inline keyboard with quality buttons. The URL itself is too long
-	// for callback_data, so buttons carry a short token instead.
-	token := pendingURLs.Put(url)
-	var buttons []models.InlineKeyboardButton
-	for _, q := range qualityOptions {
-		buttons = append(buttons, models.InlineKeyboardButton{
-			Text:         q.Label,
-			CallbackData: qualityCallbackData(q.Callback, token),
-		})
-	}
-	keyboard := &models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{buttons},
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      chatID,
-		Text:        "Pick quality for: " + trimURL(url),
-		ReplyMarkup: keyboard,
-	})
-}
-
-func handleQualityCallback(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, logger *slog.Logger, update *models.Update) {
-	cb := update.CallbackQuery
-	if cb == nil {
-		return
-	}
-
-	// Format: dl:<quality>:<token>
-	data := strings.TrimPrefix(cb.Data, "dl:")
-	idx := strings.Index(data, ":")
-	if idx < 0 {
-		return
-	}
-	quality := data[:idx]
-	url, ok := pendingURLs.Get(data[idx+1:])
-	if !ok {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "This button has expired. Send the link again."})
-		return
-	}
-	// Callback data comes from the client and can be forged; trust nothing.
-	if !downloader.ValidQuality(quality) {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Unknown quality."})
-		return
-	}
-	if _, err := safeurl.Validate(url); err != nil {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Invalid URL."})
-		return
-	}
-
-	userID := cb.From.ID
-	chatID := cb.From.ID
-	if cb.Message.Message != nil {
-		chatID = cb.Message.Message.Chat.ID
-	}
-
-	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-		CallbackQueryID: cb.ID,
-		Text:            "Downloading at " + quality + "...",
-	})
-
-	// Ban check
-	banned, _ := db.IsBanned(ctx, pool, userID)
-	if banned {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "You are banned from using this bot."})
-		return
-	}
-	if !checkRateLimit(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Slow down! Please wait before sending another URL."})
-		return
-	}
-
-	// Prefix the URL with quality marker unless "best"
-	queuedURL := url
-	if quality != "qbest" {
-		queuedURL = quality + ":" + url
-	}
-	queueURL(ctx, b, pool, cfg, logger.With("chat_id", chatID), chatID, userID, queuedURL, &models.Update{})
-}
-
-func handleInlineQuery(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, logger *slog.Logger, update *models.Update) {
-	iq := update.InlineQuery
-	if iq == nil {
-		return
-	}
-
-	query := strings.TrimSpace(iq.Query)
-	if query == "" {
-		// Show usage hint
-		_, _ = b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{
-			InlineQueryID: iq.ID,
-			Results: []models.InlineQueryResult{
-				&models.InlineQueryResultArticle{
-					ID:          "help",
-					Title:       "Downly - Media Downloader",
-					Description: "Paste a URL to queue a download",
-					InputMessageContent: &models.InputTextMessageContent{
-						MessageText: "Send a media URL to @" + getBotUsername(ctx, b) + " to download it.",
-					},
-				},
-			},
-			CacheTime:  10,
-			IsPersonal: true,
-		})
-		return
-	}
-
-	url := normalizeURL(query)
-	if !looksLikeURL(url) {
-		return
-	}
-
-	userID := iq.From.ID
-
-	// Ban check
-	banned, _ := db.IsBanned(ctx, pool, userID)
-	if banned {
-		return
-	}
-
-	botUser := getBotUsername(ctx, b)
-	shortURL := trimURL(url)
-
-	results := []models.InlineQueryResult{
-		&models.InlineQueryResultArticle{
-			ID:          "dl_best",
-			Title:       "Download (best quality)",
-			Description: shortURL,
-			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: fmt.Sprintf("Downloading %s via @%s (best quality)", shortURL, botUser),
-			},
-		},
-		&models.InlineQueryResultArticle{
-			ID:          "dl_720",
-			Title:       "Download (720p)",
-			Description: shortURL,
-			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: fmt.Sprintf("Downloading %s via @%s (720p)", shortURL, botUser),
-			},
-		},
-		&models.InlineQueryResultArticle{
-			ID:          "dl_480",
-			Title:       "Download (480p)",
-			Description: shortURL,
-			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: fmt.Sprintf("Downloading %s via @%s (480p)", shortURL, botUser),
-			},
-		},
-		&models.InlineQueryResultArticle{
-			ID:          "dl_mp3",
-			Title:       "Download (audio only)",
-			Description: shortURL,
-			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: fmt.Sprintf("Downloading %s via @%s (audio)", shortURL, botUser),
-			},
-		},
-	}
-
-	_, _ = b.AnswerInlineQuery(ctx, &bot.AnswerInlineQueryParams{
-		InlineQueryID: iq.ID,
-		Results:       results,
-		CacheTime:     5,
-		IsPersonal:    true,
-	})
-}
-
-func handlePlaylist(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string, update *models.Update, msgLog *slog.Logger) {
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Usage: /playlist <url> [max]\nFetches playlist entries and queues them for download.\nOptional: max number of videos (default 10, max 25)."})
-		return
-	}
-	url := normalizeURL(parts[1])
-	if !looksLikeURL(url) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Invalid URL."})
-		return
-	}
-
-	maxItems := 10
-	if len(parts) >= 3 {
-		if n, err := strconv.Atoi(parts[2]); err == nil && n > 0 {
-			maxItems = n
-		}
-	}
-	if maxItems > 25 {
-		maxItems = 25
-	}
-
-	banned, _ := db.IsBanned(ctx, pool, userID)
-	if banned {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "You are banned from using this bot."})
-		return
-	}
-	if !checkRateLimit(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Slow down! Please wait before sending another URL."})
-		return
-	}
-
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Fetching playlist info... this may take a moment."})
-
-	dl := downloader.YTDLP{Bin: cfg.Downly.Services.YTDLP.Bin, CookiesFile: cfg.Downly.Services.YTDLP.CookiesFile}
-	entries, playlistTitle, err := dl.FetchPlaylist(ctx, url, maxItems)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to fetch playlist: " + truncateStr(err.Error(), 200)})
-		return
-	}
-	if len(entries) == 0 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "No entries found in this playlist. It might be a single video — just send the URL directly."})
-		return
-	}
-
-	// Build summary message
-	summary := fmt.Sprintf("Playlist: %s\nFound %d entries (showing first %d):\n", truncateStr(playlistTitle, 80), len(entries), len(entries))
-	for i, e := range entries {
-		summary += fmt.Sprintf("\n%d. %s", i+1, truncateStr(e.Title, 60))
-	}
-	summary += fmt.Sprintf("\n\nQueueing %d downloads...", len(entries))
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: summary})
-
-	// Queue each entry
-	queued := 0
-	for _, e := range entries {
-		if e.URL == "" {
-			continue
-		}
-		// Check daily quota before each queue
-		if quota := cfg.Downly.Limits.DailyQuotaPerUser; quota > 0 && !isAdmin(cfg, userID) {
-			dailyCount, _ := db.UserDailyJobCount(ctx, pool, userID)
-			if dailyCount >= quota {
-				_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Daily limit reached after %d videos. Remaining items skipped.", queued)})
-				break
+	if len(r.last) >= rateLimiterPruneAt {
+		for id, t := range r.last {
+			if now.Sub(t) >= r.cooldown {
+				delete(r.last, id)
 			}
 		}
-		queueURL(ctx, b, pool, cfg, msgLog, chatID, userID, e.URL, update)
-		queued++
 	}
-	if queued > 0 {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: fmt.Sprintf("Queued %d videos from playlist.", queued)})
-	}
-}
-
-// Quality preference options for /setquality
-var qualityPreferences = []struct {
-	Label string
-	Value string
-}{
-	{"360p", "q360"},
-	{"480p", "q480"},
-	{"720p", "q720"},
-	{"1080p", "q1080"},
-	{"Best (default)", "best"},
-}
-
-func handleSetQuality(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, chatID, userID int64) {
-	current, _ := db.GetUserQuality(ctx, pool, userID)
-	currentLabel := "Best"
-	for _, q := range qualityPreferences {
-		if q.Value == current {
-			currentLabel = q.Label
-		}
-	}
-
-	// Build inline keyboard with quality buttons (one per row)
-	var rows [][]models.InlineKeyboardButton
-	for _, q := range qualityPreferences {
-		label := q.Label
-		if q.Value == current {
-			label = "✓ " + label
-		}
-		rows = append(rows, []models.InlineKeyboardButton{{
-			Text:         label,
-			CallbackData: "sq:" + q.Value,
-		}})
-	}
-	keyboard := &models.InlineKeyboardMarkup{
-		InlineKeyboard: rows,
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:      chatID,
-		Text:        fmt.Sprintf("Current quality: %s\nTap a button to set your preferred quality.\nIf unavailable, it falls back to lower resolutions automatically.", currentLabel),
-		ReplyMarkup: keyboard,
-	})
-}
-
-func handleSetQualityCallback(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, update *models.Update) {
-	cb := update.CallbackQuery
-	if cb == nil {
-		return
-	}
-
-	quality := strings.TrimPrefix(cb.Data, "sq:")
-	if !isPreferenceValue(quality) {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Unknown quality."})
-		return
-	}
-	userID := cb.From.ID
-	chatID := cb.From.ID
-	if cb.Message.Message != nil {
-		chatID = cb.Message.Message.Chat.ID
-	}
-
-	if err := db.SetUserQuality(ctx, pool, userID, quality); err != nil {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-			CallbackQueryID: cb.ID,
-			Text:            "Failed to save preference.",
-		})
-		return
-	}
-
-	label := quality
-	for _, q := range qualityPreferences {
-		if q.Value == quality {
-			label = q.Label
-		}
-	}
-
-	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-		CallbackQueryID: cb.ID,
-		Text:            "Quality set to " + label,
-	})
-
-	// Update the original message to show the new selection
-	current := quality
-	var newRows [][]models.InlineKeyboardButton
-	for _, q := range qualityPreferences {
-		btnLabel := q.Label
-		if q.Value == current {
-			btnLabel = "✓ " + btnLabel
-		}
-		newRows = append(newRows, []models.InlineKeyboardButton{{
-			Text:         btnLabel,
-			CallbackData: "sq:" + q.Value,
-		}})
-	}
-	if cb.Message.Message != nil {
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    chatID,
-			MessageID: cb.Message.Message.ID,
-			Text:      fmt.Sprintf("Quality preference saved: %s\nAll your downloads will now use this setting. If unavailable, it falls back to lower resolutions automatically.", label),
-			ReplyMarkup: &models.InlineKeyboardMarkup{
-				InlineKeyboard: newRows,
-			},
-		})
-	}
-}
-
-func handleHealth(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	platforms, err := db.GetPlatformHealth(ctx, pool, 24, 15)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load platform health."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatPlatformHealth(platforms, 24)})
-}
-
-func handleBandwidth(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, chatID, userID int64, text string) {
-	if !isAdmin(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Admin only command."})
-		return
-	}
-	limit := 20
-	parts := strings.Fields(text)
-	if len(parts) > 1 {
-		if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
-			limit = n
-		}
-	}
-	users, err := db.GetUserBandwidth(ctx, pool, limit)
-	if err != nil {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Failed to load bandwidth data."})
-		return
-	}
-	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: db.FormatUserBandwidth(users)})
-}
-
-func handleChosenInlineResult(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, logger *slog.Logger, update *models.Update) {
-	chosen := update.ChosenInlineResult
-	if chosen == nil {
-		return
-	}
-
-	userID := chosen.From.ID
-	chatID := userID // deliver download to user's DM
-	query := strings.TrimSpace(chosen.Query)
-
-	url := normalizeURL(query)
-	if !looksLikeURL(url) {
-		return
-	}
-
-	// Determine quality from the chosen result ID
-	var queuedURL string
-	switch chosen.ResultID {
-	case "dl_720":
-		queuedURL = "q720:" + url
-	case "dl_480":
-		queuedURL = "q480:" + url
-	case "dl_mp3":
-		queuedURL = "audio:" + url
-	default:
-		queuedURL = url
-	}
-
-	banned, _ := db.IsBanned(ctx, pool, userID)
-	if banned {
-		return
-	}
-	if !checkRateLimit(cfg, userID) {
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Slow down! Please wait before sending another URL."})
-		return
-	}
-
-	queueURL(ctx, b, pool, cfg, logger.With("chat_id", chatID, "inline", true), chatID, userID, queuedURL, &models.Update{})
-}
-
-func truncateStr(s string, max int) string {
-	if len(s) > max {
-		return s[:max-3] + "..."
-	}
-	return s
+	r.last[userID] = now
+	return true
 }
 
 var (
@@ -949,34 +323,6 @@ func getBotUsername(ctx context.Context, b *bot.Bot) string {
 	return cachedBotUsername
 }
 
-// qualityCallbackData builds "dl:<quality>:<token>", which always fits in
-// Telegram's 64-byte callback_data limit.
-func qualityCallbackData(quality, token string) string {
-	return "dl:" + quality + ":" + token
-}
-
-func parseJobID(text string) (int64, bool) {
-	parts := strings.Fields(text)
-	if len(parts) < 2 {
-		return 0, false
-	}
-	jobID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return jobID, true
-}
-
-func detectPriority(cfg *config.Root, update *models.Update) int {
-	if update == nil || update.Message == nil || update.Message.From == nil {
-		return 0
-	}
-	if isAdmin(cfg, update.Message.From.ID) {
-		return 1
-	}
-	return 0
-}
-
 func isAdmin(cfg *config.Root, userID int64) bool {
 	for _, id := range cfg.Downly.Admin.UserIDs {
 		if id == userID {
@@ -986,38 +332,31 @@ func isAdmin(cfg *config.Root, userID int64) bool {
 	return false
 }
 
-func checkRateLimit(cfg *config.Root, userID int64) bool {
-	rateLimitMu.Lock()
-	defer rateLimitMu.Unlock()
-	last, exists := lastSubmit[userID]
-	cooldown := time.Duration(cfg.Downly.Limits.RateLimitSeconds) * time.Second
-	if exists && time.Since(last) < cooldown {
-		return false
+func parseJobID(args string) (int64, bool) {
+	parts := strings.Fields(args)
+	if len(parts) < 1 {
+		return 0, false
 	}
-	lastSubmit[userID] = time.Now()
-	return true
+	jobID, err := strconv.ParseInt(strings.TrimPrefix(parts[0], "#"), 10, 64)
+	if err != nil || jobID <= 0 {
+		return 0, false
+	}
+	return jobID, true
 }
 
-func safePendingAhead(stats *db.QueueStats) int {
-	if stats == nil {
-		return 0
+// truncateRunes shortens s to at most max runes without breaking UTF-8.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
 	}
-	return stats.PendingAhead
+	if max <= 3 {
+		return string(r[:max])
+	}
+	return string(r[:max-3]) + "..."
 }
 
-func safeActive(stats *db.QueueStats) int {
-	if stats == nil {
-		return 0
-	}
-	return stats.Active
-}
-
-func safeUserPending(stats *db.QueueStats) int {
-	if stats == nil {
-		return 0
-	}
-	return stats.UserPending
-}
+func truncateStr(s string, max int) string { return truncateRunes(s, max) }
 
 // modePrefixes are the job-mode markers a URL may carry.
 var modePrefixes = []string{"audio:", "telegram:", "q360:", "q480:", "q720:", "q1080:"}
@@ -1077,21 +416,10 @@ func extractURLs(text string) []string {
 
 // containsURL checks if the text contains at least one URL-like string.
 func containsURL(text string) bool {
-	for _, word := range strings.Fields(text) {
-		clean, _ := stripModePrefix(word)
-		if looksLikeURL(clean) || looksLikeURL(normalizeURL(clean)) {
-			return true
-		}
-	}
-	return false
+	return len(extractURLs(text)) > 0
 }
 
-func trimURL(s string) string {
-	if len(s) > 60 {
-		return s[:57] + "..."
-	}
-	return s
-}
+func trimURL(s string) string { return truncateRunes(s, 60) }
 
 func looksLikeURL(s string) bool {
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -1105,4 +433,10 @@ func normalizeURL(s string) string {
 		return "https://" + s
 	}
 	return s
+}
+
+// qualityCallbackData builds "dl:<quality>:<token>", which always fits in
+// Telegram's 64-byte callback_data limit.
+func qualityCallbackData(quality, token string) string {
+	return "dl:" + quality + ":" + token
 }
