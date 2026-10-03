@@ -17,6 +17,7 @@ import (
 	"github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/tgutil"
 )
 
 func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, workerID int, cfg *config.Root, pool *pgxpool.Pool, b *bot.Bot) {
@@ -50,15 +51,18 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 		jobLog.Info("job claimed")
 		editProgress(jobCtx, b, job.ChatID, int(job.TelegramMsgID), formatProgressMessage(job.ID, job.Status, job.ProgressText, job.ProgressPercent, 0, 0, job.Priority))
 
-		lastPercent := -1
-		progressFn := func(text string, percent int) {
-			if percent == lastPercent {
-				return
-			}
-			lastPercent = percent
-			_ = db.UpdateProgress(jobCtx, pool, job.ID, text, percent)
-			editProgress(jobCtx, b, job.ChatID, int(job.TelegramMsgID), formatProgressMessage(job.ID, job.Status, text, percent, 0, 1, job.Priority))
-		}
+		progress := newProgressReporter(jobCtx,
+			func(ctx context.Context, text string, percent int) error {
+				return db.UpdateProgress(ctx, pool, job.ID, text, percent)
+			},
+			func(ctx context.Context, text string) error {
+				return tryEdit(ctx, b, job.ChatID, int(job.TelegramMsgID), text)
+			},
+			func(text string, percent int) string {
+				return formatProgressMessage(job.ID, job.Status, text, percent, 0, 1, job.Priority)
+			},
+		)
+		progressFn := progress.Update
 
 		// Choose download mode based on URL prefix marker
 		var res *downloader.Result
@@ -72,7 +76,7 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 			for i, q := range chain {
 				if i > 0 {
 					jobLog.Warn("quality fallback", "from", chain[i-1], "to", q)
-					progressFn(fmt.Sprintf("Quality %s unavailable, trying %s...", chain[i-1], q), 5)
+					progress.Force(fmt.Sprintf("Quality %s unavailable, trying %s...", chain[i-1], q), 5)
 					cleanJobDir(cfg.Downly.Worker.WorkDir, job.ID)
 				}
 				if q == "best" {
@@ -135,20 +139,10 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 			continue
 		}
 
-		_ = db.UpdateProgress(ctx, pool, job.ID, "Uploading to Telegram", 99)
-		editProgress(ctx, b, job.ChatID, int(job.TelegramMsgID), formatProgressMessage(job.ID, job.Status, "Uploading to Telegram", 99, 0, 1, job.Priority))
+		progress.SetContext(ctx)
+		progress.Force("Uploading to Telegram", 99)
 
-		f, err := os.Open(res.FilePath)
-		if err != nil {
-			jobLog.Error("open output failed", "path", res.FilePath, "error", err)
-			_ = db.MarkFailed(ctx, pool, job.ID, truncate(err.Error()))
-			editProgress(ctx, b, job.ChatID, int(job.TelegramMsgID), formatFailureMessage(job.ID, truncate(err.Error())))
-			continue
-		}
-
-		caption := buildCaption(res)
-		err = sendMedia(ctx, b, job.ChatID, f, res)
-		_ = f.Close()
+		err = uploadWithRetry(ctx, b, job.ChatID, res, fi.Size())
 		_ = os.Remove(res.FilePath)
 		if err != nil {
 			jobLog.Error("send media failed", "file_name", res.FileName, "error", err)
@@ -156,7 +150,6 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 			editProgress(ctx, b, job.ChatID, int(job.TelegramMsgID), formatFailureMessage(job.ID, truncate(err.Error())))
 			continue
 		}
-		_ = caption // used in sendMedia
 
 		if err := db.MarkDone(ctx, pool, job.ID, res.FilePath, res.FileName, res.Platform, fi.Size()); err != nil {
 			jobLog.Error("mark done failed", "error", err)
@@ -165,6 +158,30 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 		editProgress(ctx, b, job.ChatID, int(job.TelegramMsgID), formatDoneMessage(job.ID, res))
 		jobLog.Info("job finished", "platform", res.Platform, "file_name", res.FileName)
 	}
+}
+
+// uploadTimeout scales with file size, assuming a pessimistic 256 KiB/s uplink.
+func uploadTimeout(size int64) time.Duration {
+	d := 2*time.Minute + time.Duration(size/(256*1024))*time.Second
+	if d > 30*time.Minute {
+		d = 30 * time.Minute
+	}
+	return d
+}
+
+// uploadWithRetry sends the result, retrying on Telegram 429s. Each attempt
+// reopens the file because a failed upload has consumed the reader.
+func uploadWithRetry(ctx context.Context, b *bot.Bot, chatID int64, res *downloader.Result, size int64) error {
+	upCtx, cancel := context.WithTimeout(ctx, uploadTimeout(size))
+	defer cancel()
+	return tgutil.Call(upCtx, 3, func() error {
+		f, err := os.Open(res.FilePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return sendMedia(upCtx, b, chatID, f, res)
+	})
 }
 
 func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *downloader.Result) error {
@@ -254,11 +271,22 @@ func buildCaption(res *downloader.Result) string {
 	return strings.Join(parts, "\n")
 }
 
+// editProgress shows a final or stage-change status. These are rare, so it
+// waits out a 429 instead of dropping the edit.
 func editProgress(ctx context.Context, b *bot.Bot, chatID int64, messageID int, text string) {
+	_ = tgutil.Call(ctx, 3, func() error { return tryEdit(ctx, b, chatID, messageID, text) })
+}
+
+// tryEdit makes a single edit attempt and treats "not modified" as success.
+func tryEdit(ctx context.Context, b *bot.Bot, chatID int64, messageID int, text string) error {
 	if messageID == 0 || text == "" {
-		return
+		return nil
 	}
-	_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: messageID, Text: text})
+	_, err := b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: messageID, Text: text})
+	if tgutil.IsNotModified(err) {
+		return nil
+	}
+	return err
 }
 
 func formatProgressMessage(jobID int64, status db.JobStatus, progress string, percent, ahead, active, priority int) string {

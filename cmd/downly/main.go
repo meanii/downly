@@ -16,8 +16,8 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	cfgpkg "github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/cleanup"
+	cfgpkg "github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/logging"
 	mig "github.com/meanii/downly/internal/migrate"
@@ -73,8 +73,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// No overall client Timeout: it would also cap file uploads, which can
+	// legitimately take minutes. Calls are bounded by their contexts instead,
+	// and ResponseHeaderTimeout catches a stalled server. It must exceed the
+	// long-poll duration below.
 	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -87,11 +90,11 @@ func main() {
 			TLSHandshakeTimeout:   15 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			MaxIdleConnsPerHost:   10,
-			ResponseHeaderTimeout: 70 * time.Second,
+			ResponseHeaderTimeout: 90 * time.Second,
 		},
 	}
 
-	b, err := bot.New(cfg.Downly.Telegram.BotToken, bot.WithHTTPClient(30*time.Second, httpClient))
+	b, err := bot.New(cfg.Downly.Telegram.BotToken, bot.WithHTTPClient(60*time.Second, httpClient))
 	if err != nil {
 		logger.Error("init telegram bot failed", "error", err)
 		os.Exit(1)

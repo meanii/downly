@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -261,8 +262,8 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	err = cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -346,8 +347,8 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	err = cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -433,8 +434,8 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	err = cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -500,8 +501,8 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), nil) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	cmdErr := cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -912,7 +913,16 @@ func compressVideo(ctx context.Context, log *slog.Logger, filePath string) (stri
 	return filePath, nil
 }
 
-func readPipe(scanner *bufio.Scanner, onProgress func(text string, percent int)) []string {
+// maxKeptLines bounds how much yt-dlp output is kept for error messages.
+const maxKeptLines = 40
+
+// readPipe drains r line by line, reporting progress and returning the last
+// maxKeptLines lines. It always reads r to EOF so the child never blocks on a
+// full pipe, even if a line is too long to scan.
+func readPipe(r io.Reader, onProgress func(text string, percent int)) []string {
+	defer func() { _, _ = io.Copy(io.Discard, r) }()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	var lines []string
 	// phase tracks how many download streams have started (for video+audio 2-stream downloads).
 	// Phase 1 maps to 5–48 %, phase 2 maps to 48–95 %, single-stream maps to 5–95 %.
@@ -920,7 +930,12 @@ func readPipe(scanner *bufio.Scanner, onProgress func(text string, percent int))
 	lastMapped := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		lines = append(lines, line)
+		if !progressRE.MatchString(line) {
+			lines = append(lines, line)
+			if len(lines) > maxKeptLines {
+				lines = lines[len(lines)-maxKeptLines:]
+			}
+		}
 
 		if strings.Contains(line, "[download] Destination:") {
 			phase++

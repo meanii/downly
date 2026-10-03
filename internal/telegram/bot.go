@@ -506,12 +506,14 @@ func handleQuality(ctx context.Context, b *bot.Bot, chatID int64, text string) {
 		return
 	}
 
-	// Build inline keyboard with quality buttons
+	// Build inline keyboard with quality buttons. The URL itself is too long
+	// for callback_data, so buttons carry a short token instead.
+	token := pendingURLs.Put(url)
 	var buttons []models.InlineKeyboardButton
 	for _, q := range qualityOptions {
 		buttons = append(buttons, models.InlineKeyboardButton{
 			Text:         q.Label,
-			CallbackData: fmt.Sprintf("dl:%s:%s", q.Callback, url),
+			CallbackData: qualityCallbackData(q.Callback, token),
 		})
 	}
 	keyboard := &models.InlineKeyboardMarkup{
@@ -530,14 +532,18 @@ func handleQualityCallback(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, 
 		return
 	}
 
-	// Format: dl:<quality>:<url>
+	// Format: dl:<quality>:<token>
 	data := strings.TrimPrefix(cb.Data, "dl:")
 	idx := strings.Index(data, ":")
 	if idx < 0 {
 		return
 	}
 	quality := data[:idx]
-	url := data[idx+1:]
+	url, ok := pendingURLs.Get(data[idx+1:])
+	if !ok {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "This button has expired. Send the link again."})
+		return
+	}
 	// Callback data comes from the client and can be forged; trust nothing.
 	if !downloader.ValidQuality(quality) {
 		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Unknown quality."})
@@ -924,9 +930,14 @@ func truncateStr(s string, max int) string {
 	return s
 }
 
-var cachedBotUsername string
+var (
+	botUsernameMu     sync.Mutex
+	cachedBotUsername string
+)
 
 func getBotUsername(ctx context.Context, b *bot.Bot) string {
+	botUsernameMu.Lock()
+	defer botUsernameMu.Unlock()
 	if cachedBotUsername != "" {
 		return cachedBotUsername
 	}
@@ -935,6 +946,12 @@ func getBotUsername(ctx context.Context, b *bot.Bot) string {
 		cachedBotUsername = me.Username
 	}
 	return cachedBotUsername
+}
+
+// qualityCallbackData builds "dl:<quality>:<token>", which always fits in
+// Telegram's 64-byte callback_data limit.
+func qualityCallbackData(quality, token string) string {
+	return "dl:" + quality + ":" + token
 }
 
 func parseJobID(text string) (int64, bool) {
