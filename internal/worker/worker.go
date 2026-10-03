@@ -22,7 +22,7 @@ import (
 
 func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, workerID int, cfg *config.Root, pool *pgxpool.Pool, b *bot.Bot) {
 	poll := time.Duration(cfg.Downly.Worker.PollIntervalSec) * time.Second
-	dl := downloader.YTDLP{Bin: cfg.Downly.Services.YTDLP.Bin, CookiesFile: cfg.Downly.Services.YTDLP.CookiesFile, MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB, Logger: logger}
+	dl := downloader.YTDLP{Bin: cfg.Downly.Services.YTDLP.Bin, CookiesFile: cfg.Downly.Services.YTDLP.CookiesFile, MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB, MaxDownloadMB: cfg.Downly.Worker.MaxDownloadMB, Logger: logger}
 	workerLog := logger.With("component", "worker", "worker_id", workerID)
 
 	workerLog.Info("worker started", "poll_interval_sec", cfg.Downly.Worker.PollIntervalSec)

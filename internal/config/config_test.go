@@ -37,6 +37,9 @@ downly:
 	if cfg.Downly.Worker.WorkDir != "./tmp" {
 		t.Errorf("expected default work dir './tmp', got %q", cfg.Downly.Worker.WorkDir)
 	}
+	if cfg.Downly.Worker.MaxDownloadMB != 4*cfg.Downly.Worker.MaxFileSizeMB {
+		t.Errorf("expected default max download 4x upload limit, got %d", cfg.Downly.Worker.MaxDownloadMB)
+	}
 	if cfg.Downly.Worker.MaxFileSizeMB != 45 {
 		t.Errorf("expected default max file size 45, got %d", cfg.Downly.Worker.MaxFileSizeMB)
 	}

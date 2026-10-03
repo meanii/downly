@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -24,6 +25,11 @@ type YTDLP struct {
 	Bin           string
 	CookiesFile   string
 	MaxFileSizeMB int64
+	// MaxDownloadMB caps what we fetch before compressing down to
+	// MaxFileSizeMB. Defaults to 4x MaxFileSizeMB.
+	MaxDownloadMB int64
+	FFmpegBin     string
+	FFprobeBin    string
 	Logger        *slog.Logger
 	// HTTPClient is used for direct image/thumbnail fetches. It must refuse
 	// private addresses; defaults to safeurl.NewClient.
@@ -39,6 +45,19 @@ func (y YTDLP) httpClient() *http.Client {
 		return y.HTTPClient
 	}
 	return defaultHTTPClient
+}
+
+func (y YTDLP) maxDownloadBytes() int64 {
+	if y.MaxDownloadMB > 0 {
+		return y.MaxDownloadMB * 1024 * 1024
+	}
+	return 4 * y.maxBytes()
+}
+
+// sizeArgs makes yt-dlp abort a download that turns out larger than we can
+// ever compress down, even when metadata did not report a size.
+func (y YTDLP) sizeArgs() []string {
+	return []string{"--max-filesize", strconv.FormatInt(y.maxDownloadBytes(), 10)}
 }
 
 func (y YTDLP) maxBytes() int64 {
@@ -242,6 +261,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
+	args = append(args, y.sizeArgs()...)
 	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -286,8 +306,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 
 	// Compress for Telegram if needed
-	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
-	result.FilePath = compressedPath
+	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 
 	result.Title = meta.Title
 	result.Duration = int(meta.Duration)
@@ -371,22 +390,26 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 	return result, nil
 }
 
-// checkSize returns an error when the known/approximate file size from metadata
-// already exceeds MaxFileSizeMB, so we don't waste bandwidth downloading it.
+// checkSize returns an error when the known/approximate size from metadata
+// is beyond what we are willing to download and compress, so we don't waste
+// bandwidth on it.
 func (y YTDLP) checkSize(meta mediaInfo) error {
 	if y.MaxFileSizeMB <= 0 {
 		return nil
 	}
-	limit := y.MaxFileSizeMB * 1024 * 1024
+	limit := y.maxDownloadBytes()
 	size := meta.Filesize
 	if size == 0 {
 		size = meta.FilesizeApprox
 	}
 	if size > 0 && size > limit {
-		return fmt.Errorf("video is ~%.0fMB, exceeds the %dMB limit — try a lower quality (720p, 480p)", float64(size)/1024/1024, y.MaxFileSizeMB)
+		return fmt.Errorf("%w: video is ~%.0fMB, too large to fit in %dMB — try a lower quality (720p, 480p)", ErrTooLarge, float64(size)/1024/1024, y.MaxFileSizeMB)
 	}
 	return nil
 }
+
+// ErrTooLarge marks downloads that can never fit; retrying will not help.
+var ErrTooLarge = errors.New("file too large")
 
 func (y YTDLP) fetchMetadata(ctx context.Context, log *slog.Logger, url string) mediaInfo {
 	args := []string{"--ignore-config", "--dump-single-json", "--no-playlist", "--no-download"}
@@ -414,6 +437,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
+	args = append(args, y.sizeArgs()...)
 	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -460,8 +484,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 
 	// Compress for Telegram if needed
-	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
-	result.FilePath = compressedPath
+	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 
 	result.Title = meta.Title
 	result.Duration = int(meta.Duration)
@@ -482,6 +505,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 		"--no-playlist",
 		"-o", outputTemplate,
 	}
+	args = append(args, y.sizeArgs()...)
 	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -525,8 +549,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 	if isVideoFile(result.FileName) {
 		result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 		// Compress for Telegram if needed
-		compressedPath, _ := compressVideo(ctx, log, result.FilePath)
-		result.FilePath = compressedPath
+		result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 	}
 
 	result.Title = meta.Title
@@ -866,51 +889,6 @@ func (y YTDLP) downloadThumbnail(ctx context.Context, jobDir string, thumbURL st
 		return ""
 	}
 	return fileName
-}
-
-func compressVideo(ctx context.Context, log *slog.Logger, filePath string) (string, error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return filePath, err
-	}
-	sizeMB := float64(info.Size()) / 1024 / 1024
-	if sizeMB <= 150 {
-		return filePath, nil
-	}
-
-	log.Info("compressing video for telegram", "original_size_mb", sizeMB, "file", filePath)
-	outputPath := strings.TrimSuffix(filePath, ".mp4") + "_compressed.mp4"
-
-	args := []string{
-		"-i", filePath,
-		"-vf", "scale=1280:-2",
-		"-c:v", "libx264",
-		"-b:v", "1500k",
-		"-c:a", "aac",
-		"-b:a", "128k",
-		"-preset", "fast",
-		"-y",
-		outputPath,
-	}
-
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Error("ffmpeg compression failed", "error", err, "output", string(out))
-		return filePath, nil
-	}
-
-	compInfo, _ := os.Stat(outputPath)
-	if compInfo != nil {
-		compSizeMB := float64(compInfo.Size()) / 1024 / 1024
-		log.Info("compression complete", "original_mb", sizeMB, "compressed_mb", compSizeMB)
-		if err := os.Remove(filePath); err != nil {
-			log.Warn("failed to remove original after compression", "error", err)
-		}
-		return outputPath, nil
-	}
-
-	return filePath, nil
 }
 
 // maxKeptLines bounds how much yt-dlp output is kept for error messages.

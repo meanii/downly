@@ -10,7 +10,8 @@ downly:
     numbers_of_workers: 2
     poll_interval_sec: 3
     work_dir: "./tmp"
-    max_file_size_mb: 50
+    max_file_size_mb: 50        # Telegram Bot API upload limit
+    max_download_size_mb: 200   # larger videos are compressed to fit max_file_size_mb
     stuck_job_minutes: 15
     health_port: 8080
 

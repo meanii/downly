@@ -34,8 +34,11 @@ type Worker struct {
 	PollIntervalSec int    `yaml:"poll_interval_sec"`
 	WorkDir         string `yaml:"work_dir"`
 	MaxFileSizeMB   int64  `yaml:"max_file_size_mb"`
-	StuckJobMinutes int    `yaml:"stuck_job_minutes"`
-	HealthPort      int    `yaml:"health_port"`
+	// MaxDownloadMB is the largest source we fetch and then compress to fit
+	// MaxFileSizeMB. Defaults to 4x MaxFileSizeMB.
+	MaxDownloadMB   int64 `yaml:"max_download_size_mb"`
+	StuckJobMinutes int   `yaml:"stuck_job_minutes"`
+	HealthPort      int   `yaml:"health_port"`
 }
 
 type Services struct {
@@ -43,10 +46,10 @@ type Services struct {
 }
 
 type YTDLP struct {
-	Enabled             bool   `yaml:"enabled"`
-	Bin                 string `yaml:"bin"`
-	CookiesFile         string `yaml:"cookies_file"`
-	AutoUpdateHours     int    `yaml:"auto_update_hours"`
+	Enabled         bool   `yaml:"enabled"`
+	Bin             string `yaml:"bin"`
+	CookiesFile     string `yaml:"cookies_file"`
+	AutoUpdateHours int    `yaml:"auto_update_hours"`
 }
 
 type Limits struct {
@@ -88,6 +91,12 @@ func Load(path string) (*Root, error) {
 	}
 	if cfg.Downly.Worker.MaxFileSizeMB <= 0 {
 		cfg.Downly.Worker.MaxFileSizeMB = 45
+	}
+	if cfg.Downly.Worker.MaxDownloadMB <= 0 {
+		cfg.Downly.Worker.MaxDownloadMB = 4 * cfg.Downly.Worker.MaxFileSizeMB
+	}
+	if cfg.Downly.Worker.MaxDownloadMB < cfg.Downly.Worker.MaxFileSizeMB {
+		cfg.Downly.Worker.MaxDownloadMB = cfg.Downly.Worker.MaxFileSizeMB
 	}
 	if cfg.Downly.Worker.StuckJobMinutes <= 0 {
 		cfg.Downly.Worker.StuckJobMinutes = 15
