@@ -1,0 +1,7 @@
+version: "2"
+
+linters:
+  exclusions:
+    presets:
+      # Unchecked errors from deferred Close/Flush/os.Remove are idiomatic.
+      - std-error-handling

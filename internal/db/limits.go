@@ -78,7 +78,7 @@ func EnqueueJob(ctx context.Context, pool *pgxpool.Pool, j NewJob, lim EnqueueLi
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
 	if err := lockUser(ctx, tx, j.UserID); err != nil {
 		return 0, err
 	}

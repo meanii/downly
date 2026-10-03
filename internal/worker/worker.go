@@ -16,6 +16,7 @@ import (
 	"github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/health"
 	"github.com/meanii/downly/internal/tgutil"
 )
 
@@ -42,8 +43,24 @@ type Worker struct {
 	Waker      *Waker
 	Log        *slog.Logger
 
+	// Health receives liveness pings and outcome counters; optional.
+	Health *health.Registry
+
 	// HeartbeatInterval defaults to 30s; tests shorten it.
 	HeartbeatInterval time.Duration
+}
+
+func (w *Worker) seen() {
+	if w.Health != nil {
+		w.Health.WorkerSeen(w.ID)
+	}
+}
+
+// count records a job outcome (done, failed, retried, canceled, requeued).
+func (w *Worker) count(result string) {
+	if w.Health != nil {
+		w.Health.Inc(`downly_jobs_finished_total{result="` + result + `"}`)
+	}
 }
 
 func (w *Worker) heartbeatInterval() time.Duration {
@@ -62,10 +79,14 @@ func (w *Worker) jobTimeout() time.Duration {
 func (w *Worker) Run(claimCtx, workCtx context.Context) {
 	log := w.Log.With("component", "worker", "worker_id", w.ID)
 	poll := time.Duration(w.Cfg.Downly.Worker.PollIntervalSec) * time.Second
-	log.Info("worker started", "poll_interval", poll)
+	log.Info("worker started", "poll_interval", poll.String())
 	defer log.Info("worker stopped")
+	if w.Health != nil {
+		defer w.Health.WorkerGone(w.ID)
+	}
 
 	for claimCtx.Err() == nil {
+		w.seen()
 		var wake <-chan struct{}
 		if w.Waker != nil {
 			wake = w.Waker.C()
@@ -163,6 +184,9 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 			_ = db.MarkUserBlocked(fctx, w.Pool, job.ChatID)
 			cancel()
 		}
+		if w.Health != nil {
+			w.Health.Inc("downly_upload_failures_total")
+		}
 		w.fail(workCtx, log, job, fmt.Errorf("upload failed: %w", err), isPermanentUploadErr(err))
 		return
 	}
@@ -173,6 +197,7 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 		log.Error("mark done failed", "error", err)
 	}
 	w.editFinal(fctx, job, formatDoneMessage(job.ID, res))
+	w.count("done")
 	log.Info("job finished", "platform", res.Platform, "file_name", res.FileName)
 }
 
@@ -223,11 +248,13 @@ func (w *Worker) handleInterrupted(workCtx, runCtx context.Context, log *slog.Lo
 			return true
 		}
 		w.editFinal(fctx, job, fmt.Sprintf("Job #%d\nThe bot is restarting. Your download will resume automatically.", job.ID))
+		w.count("requeued")
 	case errors.Is(cause, errCanceledByUser):
 		log.Info("job canceled by user")
 		// /cancel already marked the row; this is a no-op unless it raced.
 		_ = db.MarkCanceled(fctx, w.Pool, job.ID, "Canceled by user")
 		w.editFinal(fctx, job, formatCanceledMessage(job.ID, "Canceled by user"))
+		w.count("canceled")
 	case errors.Is(cause, errJobLost):
 		st, _ := db.GetJobStatus(fctx, w.Pool, job.ID)
 		log.Warn("job taken away from worker", "status", st)
@@ -247,12 +274,13 @@ func (w *Worker) fail(workCtx context.Context, log *slog.Logger, job *db.Job, er
 	userMsg := friendlyError(err)
 	if !permanent && job.RetryCount < w.Cfg.Downly.Limits.MaxRetries {
 		delay := retryDelay(job.RetryCount)
-		log.Warn("download failed, scheduling retry", "error", err, "retry_count", job.RetryCount+1, "delay", delay)
+		log.Warn("download failed, scheduling retry", "error", err, "retry_count", job.RetryCount+1, "delay", delay.String())
 		if dbErr := db.MarkFailedForRetry(fctx, w.Pool, job.ID, truncate(err.Error()), delay); dbErr != nil {
 			log.Error("schedule retry failed", "error", dbErr)
 			return
 		}
 		w.editFinal(fctx, job, fmt.Sprintf("Job #%d failed: %s\nRetrying automatically in %s...", job.ID, userMsg, delay.Round(time.Second)))
+		w.count("retried")
 		return
 	}
 	log.Error("download failed", "error", err, "permanent", permanent, "retry_count", job.RetryCount)
@@ -260,6 +288,7 @@ func (w *Worker) fail(workCtx context.Context, log *slog.Logger, job *db.Job, er
 		log.Error("mark failed failed", "error", dbErr)
 	}
 	w.editFinal(fctx, job, formatFailureMessage(job.ID, userMsg))
+	w.count("failed")
 }
 
 // heartbeat keeps the job alive in the DB and stops the run if the job was
@@ -272,6 +301,7 @@ func (w *Worker) heartbeat(ctx context.Context, log *slog.Logger, jobID int64, c
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			w.seen()
 			owned, err := db.Heartbeat(ctx, w.Pool, jobID)
 			if err != nil {
 				if ctx.Err() == nil {

@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +25,9 @@ type Downly struct {
 
 type Telegram struct {
 	BotToken string `yaml:"bot_token"`
+	// APIURL points at a self-hosted Bot API server (raises the upload limit
+	// to 2GB). Empty means https://api.telegram.org.
+	APIURL string `yaml:"api_url"`
 }
 
 type Database struct {
@@ -78,14 +83,38 @@ type Cleanup struct {
 	RetentionHours int  `yaml:"retention_hours"`
 }
 
+// Environment variables that override (or replace) config file values, so
+// secrets need not live in config.yaml.
+const (
+	EnvBotToken    = "DOWNLY_BOT_TOKEN"
+	EnvPostgresURL = "DOWNLY_POSTGRES_URL"
+	EnvAdminIDs    = "DOWNLY_ADMIN_IDS" // comma-separated Telegram user IDs
+)
+
+// Load reads the YAML config at path, applies environment overrides and
+// defaults, and validates required fields. The file may be absent when the
+// required values come from the environment.
 func Load(path string) (*Root, error) {
+	var cfg Root
 	data, err := os.ReadFile(path)
-	if err != nil {
+	switch {
+	case err == nil:
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
+	case os.IsNotExist(err) && os.Getenv(EnvBotToken) != "":
+		// Fully environment-driven deployment.
+	default:
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	var cfg Root
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	if err := applyEnv(&cfg); err != nil {
+		return nil, err
+	}
+	if cfg.Downly.Telegram.BotToken == "" {
+		return nil, fmt.Errorf("telegram bot token is required (downly.telegram.bot_token or %s)", EnvBotToken)
+	}
+	if cfg.Downly.Database.PostgresURL == "" {
+		return nil, fmt.Errorf("postgres URL is required (downly.database.postgres_url or %s)", EnvPostgresURL)
 	}
 	if cfg.Downly.Worker.NumberOfWorkers <= 0 {
 		cfg.Downly.Worker.NumberOfWorkers = 2
@@ -144,4 +173,29 @@ func Load(path string) (*Root, error) {
 		cfg.Downly.Admin.StatsIntervalH = 24
 	}
 	return &cfg, nil
+}
+
+func applyEnv(cfg *Root) error {
+	if v := os.Getenv(EnvBotToken); v != "" {
+		cfg.Downly.Telegram.BotToken = v
+	}
+	if v := os.Getenv(EnvPostgresURL); v != "" {
+		cfg.Downly.Database.PostgresURL = v
+	}
+	if v := os.Getenv(EnvAdminIDs); v != "" {
+		var ids []int64
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, err := strconv.ParseInt(part, 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse %s: %q is not a user ID", EnvAdminIDs, part)
+			}
+			ids = append(ids, id)
+		}
+		cfg.Downly.Admin.UserIDs = ids
+	}
+	return nil
 }

@@ -3,17 +3,21 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      - DOWNLY_BOT_TOKEN
+      - DOWNLY_POSTGRES_URL
+      - DOWNLY_ADMIN_IDS
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ./downloads:/app/downloads
-      - ./tmp:/app/tmp
-      - ./cookies:/app/cookies
+      - ./cookies:/app/cookies:ro
+      - downly-tmp:/app/tmp
     stop_grace_period: 90s
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
     depends_on:
       db:
         condition: service_healthy
@@ -38,3 +42,4 @@ services:
 
 volumes:
   db_data:
+  downly-tmp:

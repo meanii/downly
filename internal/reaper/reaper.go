@@ -24,7 +24,7 @@ func Loop(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, stuckMin
 		interval = staleAfter
 	}
 
-	log.Info("dead job reaper started", "stale_after", staleAfter, "interval", interval)
+	log.Info("dead job reaper started", "stale_after", staleAfter.String(), "interval", interval.String())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
