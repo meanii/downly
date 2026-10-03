@@ -341,7 +341,7 @@ func parseJobURL(raw string) (url, mode, quality string) {
 	if strings.HasPrefix(raw, "audio:") {
 		return strings.TrimPrefix(raw, "audio:"), "audio", ""
 	}
-	for _, q := range []string{"q360:", "q480:", "q720:", "q1080:"} {
+	for _, q := range []string{"telegram:", "q360:", "q480:", "q720:", "q1080:"} {
 		if strings.HasPrefix(raw, q) {
 			return strings.TrimPrefix(raw, q), "quality", strings.TrimSuffix(q, ":")
 		}

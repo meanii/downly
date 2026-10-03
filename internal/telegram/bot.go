@@ -16,6 +16,7 @@ import (
 	"github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/safeurl"
 	"github.com/meanii/downly/internal/worker"
 )
 
@@ -161,7 +162,7 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 			_, prefix := stripModePrefix(url)
 			if prefix == "" {
 				userQuality, _ := db.GetUserQuality(ctx, pool, userID)
-				if userQuality != "" && userQuality != "best" {
+				if downloader.ValidQuality(userQuality) && userQuality != "best" && userQuality != "qbest" {
 					url = userQuality + ":" + url
 				}
 			}
@@ -200,6 +201,12 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 
 // queueURL handles inserting a single URL job and sending the queue ack.
 func queueURL(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.Root, msgLog *slog.Logger, chatID, userID int64, url string, update *models.Update) {
+	if !isQueueableURL(url) {
+		msgLog.Warn("rejected unsafe url", "url", url)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "That URL is not supported."})
+		return
+	}
+
 	// Daily quota check
 	if quota := cfg.Downly.Limits.DailyQuotaPerUser; quota > 0 && !isAdmin(cfg, userID) {
 		dailyCount, qErr := db.UserDailyJobCount(ctx, pool, userID)
@@ -531,6 +538,15 @@ func handleQualityCallback(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, 
 	}
 	quality := data[:idx]
 	url := data[idx+1:]
+	// Callback data comes from the client and can be forged; trust nothing.
+	if !downloader.ValidQuality(quality) {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Unknown quality."})
+		return
+	}
+	if _, err := safeurl.Validate(url); err != nil {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Invalid URL."})
+		return
+	}
 
 	userID := cb.From.ID
 	chatID := cb.From.ID
@@ -773,6 +789,10 @@ func handleSetQualityCallback(ctx context.Context, b *bot.Bot, pool *pgxpool.Poo
 	}
 
 	quality := strings.TrimPrefix(cb.Data, "sq:")
+	if !isPreferenceValue(quality) {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID, Text: "Unknown quality."})
+		return
+	}
 	userID := cb.From.ID
 	chatID := cb.From.ID
 	if cb.Message.Message != nil {
@@ -981,9 +1001,28 @@ func safeUserPending(stats *db.QueueStats) int {
 	return stats.UserPending
 }
 
+// modePrefixes are the job-mode markers a URL may carry.
+var modePrefixes = []string{"audio:", "telegram:", "q360:", "q480:", "q720:", "q1080:"}
+
+// isQueueableURL reports whether a (possibly mode-prefixed) URL is safe to hand to the downloader.
+func isQueueableURL(raw string) bool {
+	clean, _ := stripModePrefix(raw)
+	_, err := safeurl.Validate(clean)
+	return err == nil
+}
+
+func isPreferenceValue(q string) bool {
+	for _, p := range qualityPreferences {
+		if p.Value == q {
+			return true
+		}
+	}
+	return false
+}
+
 // stripModePrefix removes quality/audio prefixes from a word, returning the clean word and the prefix.
 func stripModePrefix(word string) (clean, prefix string) {
-	for _, p := range []string{"audio:", "q360:", "q480:", "q720:", "q1080:"} {
+	for _, p := range modePrefixes {
 		if strings.HasPrefix(word, p) {
 			return strings.TrimPrefix(word, p), p
 		}

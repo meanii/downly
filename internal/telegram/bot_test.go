@@ -109,6 +109,54 @@ func TestExtractURLsWithPrefix(t *testing.T) {
 	}
 }
 
+func TestIsQueueableURL(t *testing.T) {
+	ok := []string{
+		"https://youtube.com/watch?v=abc",
+		"q720:https://youtube.com/watch?v=abc",
+		"audio:https://youtube.com/watch?v=abc",
+		"telegram:https://youtube.com/watch?v=abc",
+	}
+	bad := []string{
+		"--exec=id",
+		"q720:--exec=id",
+		"--exec=id #:https://youtube.com/watch?v=abc",
+		"http://localhost:8080/health",
+		"https://169.254.169.254/latest/meta-data",
+		"file:///etc/passwd",
+		"bogus:https://youtube.com",
+	}
+	for _, u := range ok {
+		if !isQueueableURL(u) {
+			t.Errorf("isQueueableURL(%q) = false, want true", u)
+		}
+	}
+	for _, u := range bad {
+		if isQueueableURL(u) {
+			t.Errorf("isQueueableURL(%q) = true, want false", u)
+		}
+	}
+}
+
+func TestIsPreferenceValue(t *testing.T) {
+	for _, q := range []string{"q360", "q480", "q720", "q1080", "best"} {
+		if !isPreferenceValue(q) {
+			t.Errorf("%q should be accepted", q)
+		}
+	}
+	for _, q := range []string{"", "--exec=id #", "q4k", "audio"} {
+		if isPreferenceValue(q) {
+			t.Errorf("%q should be rejected", q)
+		}
+	}
+}
+
+func TestStripModePrefixTelegram(t *testing.T) {
+	clean, prefix := stripModePrefix("telegram:https://test.com")
+	if clean != "https://test.com" || prefix != "telegram:" {
+		t.Fatalf("got %q %q", clean, prefix)
+	}
+}
+
 func TestStripModePrefix(t *testing.T) {
 	tests := []struct {
 		input      string

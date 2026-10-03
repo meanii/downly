@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -15,6 +14,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/meanii/downly/internal/safeurl"
 )
 
 type YTDLP struct {
@@ -22,6 +24,53 @@ type YTDLP struct {
 	CookiesFile   string
 	MaxFileSizeMB int64
 	Logger        *slog.Logger
+	// HTTPClient is used for direct image/thumbnail fetches. It must refuse
+	// private addresses; defaults to safeurl.NewClient.
+	HTTPClient *http.Client
+}
+
+const maxThumbnailBytes = 10 * 1024 * 1024
+
+var defaultHTTPClient = safeurl.NewClient(2 * time.Minute)
+
+func (y YTDLP) httpClient() *http.Client {
+	if y.HTTPClient != nil {
+		return y.HTTPClient
+	}
+	return defaultHTTPClient
+}
+
+func (y YTDLP) maxBytes() int64 {
+	if y.MaxFileSizeMB <= 0 {
+		return 50 * 1024 * 1024
+	}
+	return y.MaxFileSizeMB * 1024 * 1024
+}
+
+// command builds a yt-dlp invocation. The URL always goes after "--" so a
+// value that starts with "-" can never be parsed as an option.
+func (y YTDLP) command(ctx context.Context, args []string, url string) *exec.Cmd {
+	return exec.CommandContext(ctx, y.Bin, y.buildArgs(args, url)...)
+}
+
+func (y YTDLP) buildArgs(args []string, url string) []string {
+	out := append([]string{}, args...)
+	if y.CookiesFile != "" {
+		if _, err := os.Stat(y.CookiesFile); err == nil {
+			out = append(out, "--cookies", y.CookiesFile)
+		}
+	}
+	return append(out, "--", url)
+}
+
+// validQualities lists every quality value accepted from users.
+var validQualities = map[string]bool{
+	"q360": true, "q480": true, "q720": true, "q1080": true, "telegram": true, "best": true, "qbest": true,
+}
+
+// ValidQuality reports whether q is a known quality setting.
+func ValidQuality(q string) bool {
+	return validQualities[q]
 }
 
 type MediaType int
@@ -65,6 +114,10 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 	}
 	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "bin", y.Bin)
 
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, err
+	}
+
 	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		log.Error("create job dir failed", "job_dir", jobDir, "error", err)
@@ -77,7 +130,7 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 		if onProgress != nil {
 			onProgress("Downloading image", 10)
 		}
-		return downloadURL(ctx, jobDir, url, "image", "direct")
+		return y.downloadURL(ctx, jobDir, url, "image", "direct")
 	}
 
 	// Fetch metadata
@@ -164,6 +217,10 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	}
 	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "quality", quality)
 
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, err
+	}
+
 	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		return nil, err
@@ -184,14 +241,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -232,7 +282,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	}
 
 	// Download thumbnail for better video preview in Telegram
-	result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+	result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 
 	// Compress for Telegram if needed
 	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
@@ -255,6 +305,10 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 	}
 	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "bin", y.Bin, "mode", "audio")
 
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, err
+	}
+
 	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		return nil, err
@@ -272,14 +326,7 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 		"--audio-quality", "0",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -342,14 +389,7 @@ func (y YTDLP) checkSize(meta mediaInfo) error {
 
 func (y YTDLP) fetchMetadata(ctx context.Context, log *slog.Logger, url string) mediaInfo {
 	args := []string{"--ignore-config", "--dump-single-json", "--no-playlist", "--no-download"}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	out, err := cmd.Output()
 	meta := mediaInfo{Platform: "unknown"}
 	if err == nil {
@@ -373,14 +413,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -423,7 +456,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	}
 
 	// Download thumbnail for better video preview in Telegram
-	result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+	result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 
 	// Compress for Telegram if needed
 	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
@@ -448,14 +481,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 		"--no-playlist",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -496,7 +522,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 
 	// Download thumbnail for video files
 	if isVideoFile(result.FileName) {
-		result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+		result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 		// Compress for Telegram if needed
 		compressedPath, _ := compressVideo(ctx, log, result.FilePath)
 		result.FilePath = compressedPath
@@ -519,14 +545,7 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		"--convert-thumbnails", "jpg",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		log.Info("thumbnail download succeeded")
@@ -550,7 +569,7 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		if onProgress != nil {
 			onProgress("Downloading image", 50)
 		}
-		return downloadURL(ctx, jobDir, meta.ThumbnailURL, meta.ID, meta.Platform)
+		return y.downloadURL(ctx, jobDir, meta.ThumbnailURL, meta.ID, meta.Platform)
 	}
 
 	// Last resort: fetch the URL directly if it looks like an image.
@@ -559,18 +578,21 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		if onProgress != nil {
 			onProgress("Downloading image directly", 50)
 		}
-		return downloadURL(ctx, jobDir, url, "image", "direct")
+		return y.downloadURL(ctx, jobDir, url, "image", "direct")
 	}
 
 	return nil, fmt.Errorf("no video or image could be extracted from this URL")
 }
 
-func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result, error) {
+func (y YTDLP) downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result, error) {
+	if _, err := safeurl.Validate(url); err != nil {
+		return nil, fmt.Errorf("image download refused: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := y.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("image download failed: %w", err)
 	}
@@ -578,6 +600,9 @@ func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("image download returned status %d", resp.StatusCode)
+	}
+	if resp.ContentLength > y.maxBytes() {
+		return nil, fmt.Errorf("image download: %w", safeurl.ErrTooLarge)
 	}
 
 	ext := "jpg"
@@ -591,15 +616,16 @@ func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result
 		ext = "gif"
 	}
 
-	fileName := fmt.Sprintf("%s.%s", id, ext)
+	fileName := fmt.Sprintf("%s.%s", safeFileStem(id), ext)
 	filePath := filepath.Join(jobDir, fileName)
 	f, err := os.Create(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return nil, err
+	if _, err := safeurl.CopyLimited(f, resp.Body, y.maxBytes()); err != nil {
+		_ = os.Remove(filePath)
+		return nil, fmt.Errorf("image download: %w", err)
 	}
 
 	return &Result{
@@ -608,6 +634,22 @@ func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result
 		Platform: platform,
 		Media:    MediaPhoto,
 	}, nil
+}
+
+var unsafeStemRE = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// safeFileStem turns an extractor-supplied ID into something that cannot
+// escape the job directory.
+func safeFileStem(id string) string {
+	s := unsafeStemRE.ReplaceAllString(id, "_")
+	s = strings.Trim(s, ".")
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	if s == "" {
+		return "file"
+	}
+	return s
 }
 
 // friendlyFileName builds a human-readable filename from title + id metadata,
@@ -742,20 +784,17 @@ type playlistJSON struct {
 
 // FetchPlaylist fetches playlist metadata and returns individual entry URLs.
 func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]PlaylistEntry, string, error) {
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, "", err
+	}
 	args := []string{
+		"--ignore-config",
 		"--dump-single-json",
 		"--flat-playlist",
 		"--no-download",
 		"--playlist-end", strconv.Itoa(maxItems),
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, "", fmt.Errorf("playlist fetch failed: %w", err)
@@ -785,8 +824,11 @@ func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]P
 }
 
 // downloadThumbnail fetches and stores the thumbnail for a video in the job directory.
-func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) string {
+func (y YTDLP) downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) string {
 	if thumbURL == "" {
+		return ""
+	}
+	if _, err := safeurl.Validate(thumbURL); err != nil {
 		return ""
 	}
 
@@ -794,7 +836,7 @@ func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) stri
 	if err != nil {
 		return ""
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := y.httpClient().Do(req)
 	if err != nil {
 		return ""
 	}
@@ -818,7 +860,8 @@ func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) stri
 		return ""
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := safeurl.CopyLimited(f, resp.Body, maxThumbnailBytes); err != nil {
+		_ = os.Remove(fileName)
 		return ""
 	}
 	return fileName

@@ -124,6 +124,7 @@ func TestParseJobURL(t *testing.T) {
 		{"q480:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q480"},
 		{"q1080:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q1080"},
 		{"q360:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q360"},
+		{"telegram:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "telegram"},
 	}
 	for _, tt := range tests {
 		url, mode, quality := parseJobURL(tt.raw)
