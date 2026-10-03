@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/meanii/downly/internal/db"
 )
 
 func Loop(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, enabled bool, retentionHours int) {
@@ -17,10 +19,10 @@ func Loop(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, enabled 
 	defer ticker.Stop()
 
 	for {
-		if err := runOnce(ctx, pool, retentionHours); err != nil {
+		if n, err := db.PruneJobs(ctx, pool, retentionHours); err != nil {
 			log.Error("cleanup failed", "error", err)
 		} else {
-			log.Info("cleanup completed", "retention_hours", retentionHours)
+			log.Info("cleanup completed", "retention_hours", retentionHours, "pruned_jobs", n)
 		}
 
 		select {
@@ -29,14 +31,4 @@ func Loop(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, enabled 
 		case <-ticker.C:
 		}
 	}
-}
-
-func runOnce(ctx context.Context, pool *pgxpool.Pool, retentionHours int) error {
-	_, err := pool.Exec(ctx, `
-		delete from download_jobs
-		where status in ('done', 'failed', 'canceled')
-		and finished_at is not null
-		and finished_at < now() - make_interval(hours => $1)
-	`, retentionHours)
-	return err
 }

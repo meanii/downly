@@ -66,11 +66,11 @@ func Loop(ctx context.Context, logger *slog.Logger, controller *Controller, work
 
 		// Choose download mode based on URL prefix marker
 		var res *downloader.Result
-		actualURL, mode, quality := parseJobURL(job.URL)
-		switch mode {
-		case "audio":
+		actualURL, quality := job.URL, job.Quality
+		switch {
+		case job.Mode == db.ModeAudio:
 			res, err = dl.DownloadAudio(jobCtx, cfg.Downly.Worker.WorkDir, job.ID, actualURL, progressFn)
-		case "quality":
+		case quality != "":
 			// Cascading quality fallback: try preferred, then step down
 			chain := downloader.QualityFallbackChain(quality)
 			for i, q := range chain {
@@ -361,18 +361,4 @@ func cleanJobDir(workDir string, jobID int64) {
 			_ = os.Remove(fmt.Sprintf("%s/%s", jobDir, entry.Name()))
 		}
 	}
-}
-
-// parseJobURL extracts mode and quality from prefixed URLs.
-// Formats: "audio:<url>", "q720:<url>", "q480:<url>", "q1080:<url>", "<url>"
-func parseJobURL(raw string) (url, mode, quality string) {
-	if strings.HasPrefix(raw, "audio:") {
-		return strings.TrimPrefix(raw, "audio:"), "audio", ""
-	}
-	for _, q := range []string{"telegram:", "q360:", "q480:", "q720:", "q1080:"} {
-		if strings.HasPrefix(raw, q) {
-			return strings.TrimPrefix(raw, q), "quality", strings.TrimSuffix(q, ":")
-		}
-	}
-	return raw, "default", ""
 }

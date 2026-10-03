@@ -18,7 +18,6 @@ import (
 
 	"github.com/meanii/downly/internal/cleanup"
 	cfgpkg "github.com/meanii/downly/internal/config"
-	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/logging"
 	mig "github.com/meanii/downly/internal/migrate"
 	"github.com/meanii/downly/internal/reaper"
@@ -58,14 +57,6 @@ func main() {
 		logger.Error("run migrations failed", "error", err)
 		os.Exit(1)
 	}
-	if err := db.EnsureSchema(ctx, pool); err != nil {
-		logger.Error("ensure schema compatibility failed", "error", err)
-		os.Exit(1)
-	}
-	if err := db.EnsurePreferencesTable(ctx, pool); err != nil {
-		logger.Error("ensure preferences table failed", "error", err)
-		os.Exit(1)
-	}
 	logger.Info("schema ready")
 
 	if err := os.MkdirAll(cfg.Downly.Worker.WorkDir, 0o755); err != nil {
@@ -94,7 +85,10 @@ func main() {
 		},
 	}
 
-	b, err := bot.New(cfg.Downly.Telegram.BotToken, bot.WithHTTPClient(60*time.Second, httpClient))
+	b, err := bot.New(cfg.Downly.Telegram.BotToken,
+		bot.WithHTTPClient(60*time.Second, httpClient),
+		bot.WithMiddlewares(tgbot.UserTracker(pool, logger)),
+	)
 	if err != nil {
 		logger.Error("init telegram bot failed", "error", err)
 		os.Exit(1)

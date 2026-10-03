@@ -240,7 +240,11 @@ func queueURL(ctx context.Context, b *bot.Bot, pool *pgxpool.Pool, cfg *config.R
 		return
 	}
 
-	jobID, err := db.InsertJob(ctx, pool, chatID, userID, url, int64(reply.ID), priority)
+	cleanURL, mode, quality := jobSpec(url)
+	jobID, err := db.InsertJob(ctx, pool, db.NewJob{
+		ChatID: chatID, UserID: userID, URL: cleanURL, Mode: mode, Quality: quality,
+		TelegramMsgID: int64(reply.ID), Priority: priority,
+	})
 	if err != nil {
 		msgLog.Error("insert job failed", "error", err)
 		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{ChatID: chatID, MessageID: reply.ID, Text: "Failed to queue this request."})
@@ -1035,6 +1039,20 @@ func isPreferenceValue(q string) bool {
 		}
 	}
 	return false
+}
+
+// jobSpec turns a possibly prefixed URL ("audio:<url>", "q720:<url>") into
+// the URL plus the job's mode and quality.
+func jobSpec(raw string) (url string, mode db.JobMode, quality string) {
+	clean, prefix := stripModePrefix(raw)
+	switch prefix {
+	case "":
+		return clean, db.ModeVideo, ""
+	case "audio:":
+		return clean, db.ModeAudio, ""
+	default:
+		return clean, db.ModeVideo, strings.TrimSuffix(prefix, ":")
+	}
 }
 
 // stripModePrefix removes quality/audio prefixes from a word, returning the clean word and the prefix.
