@@ -3,7 +3,6 @@ package telegram
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -18,22 +17,10 @@ import (
 	"github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/i18n"
 	"github.com/meanii/downly/internal/safeurl"
 	"github.com/meanii/downly/internal/worker"
 )
-
-// Quality options for inline keyboard
-var qualityOptions = []struct {
-	Label    string
-	Callback string
-}{
-	{"📱 Telegram", "telegram"},
-	{"360p", "q360"},
-	{"480p", "q480"},
-	{"720p", "q720"},
-	{"1080p", "q1080"},
-	{"Best", "qbest"},
-}
 
 const repoURL = "https://github.com/meanii/downly"
 
@@ -51,8 +38,15 @@ type handler struct {
 	commands   map[string]commandFunc
 }
 
-// commandFunc handles "/name args". msg is the original message.
-type commandFunc func(ctx context.Context, msg *models.Message, args string)
+// request is a parsed command invocation.
+type request struct {
+	msg  *models.Message
+	args string
+	lang i18n.Lang
+}
+
+// commandFunc handles "/name args".
+type commandFunc func(ctx context.Context, r *request)
 
 func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.Controller, b *bot.Bot, pool *pgxpool.Pool) {
 	h := &handler{
@@ -72,6 +66,10 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "sq:")
 	}, h.onSetQualityCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && (strings.HasPrefix(u.CallbackQuery.Data, "lang:") || strings.HasPrefix(u.CallbackQuery.Data, "set:"))
+	}, h.onSettingsCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.MyChatMember != nil }, h.onMyChatMember)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
 }
@@ -90,7 +88,7 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		}
 		if cmd, found := h.commands[name]; found {
 			h.log.Info("command", "command", name, "chat_id", msg.Chat.ID, "user_id", msg.From.ID)
-			cmd(ctx, msg, args)
+			cmd(ctx, &request{msg: msg, args: args, lang: h.langFor(ctx, msg.Chat.ID, msg.From)})
 		}
 		return
 	}
@@ -100,7 +98,8 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 	chatID, userID := msg.Chat.ID, msg.From.ID
-	if !h.allowSubmit(ctx, chatID, userID) {
+	lang := h.langFor(ctx, chatID, msg.From)
+	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
 	quality := h.preferredQuality(ctx, userID)
@@ -109,7 +108,7 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
 			url = quality + ":" + url
 		}
-		if _, err := h.enqueue(ctx, chatID, userID, url); err != nil {
+		if _, err := h.enqueue(ctx, chatID, userID, lang, url); err != nil {
 			// Limit and validation errors were already reported; stop on the
 			// first so a long list does not produce a wall of errors.
 			return
@@ -176,21 +175,52 @@ func (h *handler) answerCallback(ctx context.Context, id, text string) {
 
 // allowSubmit applies the ban check and rate limit to a new download request,
 // telling the user when they are refused.
-func (h *handler) allowSubmit(ctx context.Context, chatID, userID int64) bool {
+func (h *handler) allowSubmit(ctx context.Context, chatID, userID int64, lang i18n.Lang) bool {
 	banned, err := db.IsBanned(ctx, h.pool, userID)
 	if err != nil {
 		// Fail open: a DB hiccup shouldn't lock everyone out.
 		h.log.Error("ban check failed", "user_id", userID, "error", err)
 	}
 	if banned {
-		h.reply(ctx, chatID, "You are banned from using this bot.")
+		h.reply(ctx, chatID, i18n.T(lang, "banned"))
 		return false
 	}
 	if !h.limiter.Allow(userID) {
-		h.reply(ctx, chatID, "Slow down! Please wait before sending another URL.")
+		h.reply(ctx, chatID, i18n.T(lang, "slow_down"))
 		return false
 	}
 	return true
+}
+
+// langFor picks the language for replies in chatID to user: the chat's
+// chosen language, then (in groups) the user's own choice, then a guess from
+// the user's Telegram client language.
+func (h *handler) langFor(ctx context.Context, chatID int64, user *models.User) i18n.Lang {
+	if l, ok := h.storedLang(ctx, chatID); ok {
+		return l
+	}
+	if user == nil {
+		return i18n.Default
+	}
+	if user.ID != chatID {
+		if l, ok := h.storedLang(ctx, user.ID); ok {
+			return l
+		}
+	}
+	return i18n.Guess(user.LanguageCode)
+}
+
+// storedLang returns the language explicitly chosen for chatID, if any.
+func (h *handler) storedLang(ctx context.Context, chatID int64) (i18n.Lang, bool) {
+	code, ok, err := db.GetChatLanguage(ctx, h.pool, chatID)
+	if err != nil {
+		h.log.Warn("load chat language failed", "chat_id", chatID, "error", err)
+		return "", false
+	}
+	if !ok {
+		return "", false
+	}
+	return i18n.Parse(code)
 }
 
 // preferredQuality returns the user's saved quality prefix ("q720"), or "".
@@ -213,23 +243,23 @@ func (h *handler) limitsFor(userID int64) db.EnqueueLimits {
 	return lim
 }
 
-func limitMessage(le *db.LimitError) string {
+func limitMessage(lang i18n.Lang, le *db.LimitError) string {
 	switch le.Kind {
 	case db.LimitDaily:
-		return fmt.Sprintf("Daily limit reached (%d/%d). Try again tomorrow.", le.Count, le.Limit)
+		return i18n.T(lang, "limit_daily", le.Count, le.Limit)
 	default:
-		return fmt.Sprintf("Queue limit reached. You already have %d pending jobs. Wait for some to finish or /cancel one.", le.Count)
+		return i18n.T(lang, "limit_queue", le.Count)
 	}
 }
 
 // enqueue validates url (optionally mode-prefixed), inserts a job within the
 // user's limits and posts the status message the worker will keep updated.
 // Every failure is reported to the user before returning.
-func (h *handler) enqueue(ctx context.Context, chatID, userID int64, url string) (int64, error) {
+func (h *handler) enqueue(ctx context.Context, chatID, userID int64, lang i18n.Lang, url string) (int64, error) {
 	log := h.log.With("chat_id", chatID, "user_id", userID)
 	if !isQueueableURL(url) {
 		log.Warn("rejected unsafe url", "url", url)
-		h.reply(ctx, chatID, "That URL is not supported.")
+		h.reply(ctx, chatID, i18n.T(lang, "url_unsupported"))
 		return 0, safeurl.ErrInvalidURL
 	}
 
@@ -237,7 +267,7 @@ func (h *handler) enqueue(ctx context.Context, chatID, userID int64, url string)
 	if isAdmin(h.cfg, userID) {
 		priority = 1
 	}
-	reply, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "Queueing your download..."})
+	reply, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: i18n.T(lang, "queueing")})
 	if err != nil {
 		log.Error("send queue ack failed", "error", err)
 		return 0, err
@@ -249,12 +279,12 @@ func (h *handler) enqueue(ctx context.Context, chatID, userID int64, url string)
 		TelegramMsgID: int64(reply.ID), Priority: priority,
 	}, h.limitsFor(userID))
 	if le, ok := db.IsLimit(err); ok {
-		h.edit(ctx, chatID, reply.ID, limitMessage(le))
+		h.edit(ctx, chatID, reply.ID, limitMessage(lang, le))
 		return 0, err
 	}
 	if err != nil {
 		log.Error("insert job failed", "error", err)
-		h.edit(ctx, chatID, reply.ID, "Failed to queue this request. Please try again.")
+		h.edit(ctx, chatID, reply.ID, i18n.T(lang, "queue_failed"))
 		return 0, err
 	}
 
@@ -263,9 +293,9 @@ func (h *handler) enqueue(ctx context.Context, chatID, userID int64, url string)
 		log.Error("get queue stats failed", "job_id", jobID, "error", err)
 		stats = &db.QueueStats{}
 	}
-	textOut := fmt.Sprintf("Job #%d queued\nPosition ahead: %d\nActive downloads: %d\nYour active jobs: %d", jobID, stats.PendingAhead, stats.Active, stats.UserPending)
+	textOut := i18n.T(lang, "queued", jobID, stats.PendingAhead, stats.Active, stats.UserPending)
 	if priority > 0 {
-		textOut += fmt.Sprintf("\nPriority: %d", priority)
+		textOut += "\n" + i18n.T(lang, "priority_line", priority)
 	}
 	h.edit(ctx, chatID, reply.ID, textOut)
 	log.Info("job queued", "job_id", jobID, "url", cleanURL, "mode", mode, "quality", quality, "telegram_message_id", reply.ID)

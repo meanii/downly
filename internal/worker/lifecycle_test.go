@@ -71,6 +71,7 @@ type fakeMsg struct {
 	mu        sync.Mutex
 	edits     []string
 	uploads   int
+	captions  []string
 	uploadErr func(attempt int) error
 }
 
@@ -81,7 +82,10 @@ func (m *fakeMsg) Edit(_ context.Context, _ int64, _ int, text string) error {
 	return nil
 }
 func (m *fakeMsg) Send(context.Context, int64, string) error { return nil }
-func (m *fakeMsg) SendResult(ctx context.Context, _ int64, res *downloader.Result) error {
+func (m *fakeMsg) SendResult(ctx context.Context, _ int64, res *downloader.Result, caption string) error {
+	m.mu.Lock()
+	m.captions = append(m.captions, caption)
+	m.mu.Unlock()
 	m.mu.Lock()
 	m.uploads++
 	n := m.uploads

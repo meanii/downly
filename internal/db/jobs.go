@@ -420,8 +420,8 @@ func PruneJobs(ctx context.Context, pool *pgxpool.Pool, retentionHours int) (int
 	return n, err
 }
 
-// modeLabel is a short tag for job listings, e.g. "audio" or "720p".
-func modeLabel(job Job) string {
+// ModeLabel is a short tag for job listings, e.g. "audio" or "720p".
+func ModeLabel(job Job) string {
 	if job.Mode == ModeAudio {
 		return "audio"
 	}
@@ -440,60 +440,6 @@ func modeLabel(job Job) string {
 	return ""
 }
 
-func FormatUserQueueSummary(jobs []Job) string {
-	if len(jobs) == 0 {
-		return "You have no recent jobs. Send a URL to queue a download."
-	}
-	lines := []string{"Your recent jobs:"}
-	for _, job := range jobs {
-		line := fmt.Sprintf("#%d | %s | %s", job.ID, job.Status, trimURL(job.URL))
-		if l := modeLabel(job); l != "" {
-			line += " | " + l
-		}
-		if job.Priority > 0 {
-			line += fmt.Sprintf(" | priority %d", job.Priority)
-		}
-		if job.Status == StatusPending && job.QueuePosition > 0 {
-			line += fmt.Sprintf(" | position %d", job.QueuePosition)
-		}
-		if job.ProgressText != "" {
-			line += fmt.Sprintf(" | %s", job.ProgressText)
-		}
-		if job.ProgressPercent > 0 {
-			line += fmt.Sprintf(" (%d%%)", job.ProgressPercent)
-		}
-		if job.Status == StatusCanceled && job.ErrorMessage != "" {
-			line += fmt.Sprintf(" | reason: %s", job.ErrorMessage)
-		}
-		lines = append(lines, line)
-	}
-	return joinLines(lines)
-}
-
-func FormatUserHistory(jobs []Job) string {
-	if len(jobs) == 0 {
-		return "No download history yet."
-	}
-	lines := []string{"Your download history:"}
-	for _, job := range jobs {
-		line := fmt.Sprintf("#%d | %s | %s", job.ID, job.Status, trimURL(job.URL))
-		if l := modeLabel(job); l != "" {
-			line += " | " + l
-		}
-		if job.Platform != "" {
-			line += fmt.Sprintf(" | %s", job.Platform)
-		}
-		if job.Status == StatusCanceled && job.ErrorMessage != "" {
-			line += fmt.Sprintf(" | %s", job.ErrorMessage)
-		}
-		if job.FinishedAt != nil {
-			line += fmt.Sprintf(" | %s", job.FinishedAt.Format("Jan 02 15:04"))
-		}
-		lines = append(lines, line)
-	}
-	return joinLines(lines)
-}
-
 func FormatActiveJobs(jobs []Job) string {
 	if len(jobs) == 0 {
 		return "No active or pending jobs."
@@ -501,7 +447,7 @@ func FormatActiveJobs(jobs []Job) string {
 	lines := []string{fmt.Sprintf("Active/pending jobs (%d):", len(jobs))}
 	for _, job := range jobs {
 		line := fmt.Sprintf("#%d | %s | user %d | %s", job.ID, job.Status, job.UserID, trimURL(job.URL))
-		if l := modeLabel(job); l != "" {
+		if l := ModeLabel(job); l != "" {
 			line += " | " + l
 		}
 		if job.ProgressText != "" {

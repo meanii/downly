@@ -13,6 +13,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/i18n"
 	"github.com/meanii/downly/internal/tgutil"
 )
 
@@ -22,8 +23,8 @@ type Messenger interface {
 	Edit(ctx context.Context, chatID int64, messageID int, text string) error
 	// Send posts a new text message.
 	Send(ctx context.Context, chatID int64, text string) error
-	// SendResult uploads a finished download.
-	SendResult(ctx context.Context, chatID int64, res *downloader.Result) error
+	// SendResult uploads a finished download with the given caption.
+	SendResult(ctx context.Context, chatID int64, res *downloader.Result, caption string) error
 }
 
 // Downloader is everything the worker needs from yt-dlp.
@@ -52,13 +53,13 @@ func (m TelegramMessenger) Send(ctx context.Context, chatID int64, text string) 
 	return err
 }
 
-func (m TelegramMessenger) SendResult(ctx context.Context, chatID int64, res *downloader.Result) error {
+func (m TelegramMessenger) SendResult(ctx context.Context, chatID int64, res *downloader.Result, caption string) error {
 	f, err := os.Open(res.FilePath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return sendMedia(ctx, m.Bot, chatID, f, res)
+	return sendMedia(ctx, m.Bot, chatID, f, res, caption)
 }
 
 // uploadTimeout scales with file size, assuming a pessimistic 256 KiB/s uplink.
@@ -79,13 +80,13 @@ var (
 
 // uploadWithRetry sends the result, waiting out 429s and retrying transient
 // failures with backoff. Permanent Telegram errors return immediately.
-func uploadWithRetry(ctx context.Context, msg Messenger, chatID int64, res *downloader.Result, size int64) error {
+func uploadWithRetry(ctx context.Context, msg Messenger, chatID int64, res *downloader.Result, caption string, size int64) error {
 	upCtx, cancel := context.WithTimeout(ctx, uploadTimeout(size))
 	defer cancel()
 	var err error
 	wait := uploadBackoff
 	for attempt := 1; attempt <= uploadAttempts; attempt++ {
-		err = tgutil.Call(upCtx, 3, func() error { return msg.SendResult(upCtx, chatID, res) })
+		err = tgutil.Call(upCtx, 3, func() error { return msg.SendResult(upCtx, chatID, res, caption) })
 		if err == nil || isPermanentUploadErr(err) || upCtx.Err() != nil || attempt == uploadAttempts {
 			break
 		}
@@ -99,8 +100,7 @@ func uploadWithRetry(ctx context.Context, msg Messenger, chatID int64, res *down
 	return err
 }
 
-func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *downloader.Result) error {
-	caption := buildCaption(res)
+func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *downloader.Result, caption string) error {
 	upload := &models.InputFileUpload{Filename: res.FileName, Data: f}
 
 	var err error
@@ -152,7 +152,7 @@ func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *d
 	return err
 }
 
-func buildCaption(res *downloader.Result) string {
+func buildCaption(lang i18n.Lang, res *downloader.Result) string {
 	parts := []string{}
 	if res.Title != "" {
 		parts = append(parts, truncateRunes(res.Title, 100))
@@ -160,13 +160,13 @@ func buildCaption(res *downloader.Result) string {
 	if res.Duration > 0 {
 		m := res.Duration / 60
 		s := res.Duration % 60
-		parts = append(parts, fmt.Sprintf("Duration: %d:%02d", m, s))
+		parts = append(parts, i18n.T(lang, "caption_duration", fmt.Sprintf("%d:%02d", m, s)))
 	}
 	if res.Platform != "" && res.Platform != "unknown" {
-		parts = append(parts, "Source: "+res.Platform)
+		parts = append(parts, i18n.T(lang, "caption_source", res.Platform))
 	}
 	if len(parts) == 0 {
-		return "Done."
+		return i18n.T(lang, "caption_done")
 	}
 	return strings.Join(parts, "\n")
 }

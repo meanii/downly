@@ -165,6 +165,11 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 	if err == nil {
 		return result, nil
 	}
+	// The media exists but can't be accessed: the fallbacks below would only
+	// replace this clear reason with a vague "no image found".
+	if IsUnavailable(err) {
+		return nil, err
+	}
 
 	// On any yt-dlp failure, retry without a format selector — this handles
 	// photo posts (Instagram, Twitter/X, Reddit, etc.) where yt-dlp can
@@ -406,6 +411,40 @@ func (y YTDLP) checkSize(meta mediaInfo) error {
 		return fmt.Errorf("%w: video is ~%.0fMB, too large to fit in %dMB — try a lower quality (720p, 480p)", ErrTooLarge, float64(size)/1024/1024, y.MaxFileSizeMB)
 	}
 	return nil
+}
+
+// unavailableMarkers are yt-dlp messages meaning the media exists but cannot
+// be fetched, so neither retries nor format/image fallbacks will help.
+var unavailableMarkers = []string{
+	"private video",
+	"video unavailable",
+	"this video is unavailable",
+	"this video has been removed",
+	"members-only",
+	"join this channel",
+	"sign in to confirm your age",
+	"age-restricted",
+	"copyright",
+	"file is larger than max-filesize",
+	"requested content is not available",
+}
+
+// IsUnavailable reports whether err says the media can't be accessed
+// (private, removed, members-only, age-gated, too large).
+func IsUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrTooLarge) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range unavailableMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // ErrTooLarge marks downloads that can never fit; retrying will not help.

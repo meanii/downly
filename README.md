@@ -51,6 +51,21 @@ User commands:
 
 You can also prefix a URL with `q360:`, `q480:`, `q720:`, `q1080:` or `audio:`.
 
+- `/settings` - language and default quality
+- `/language` - change the language
+
+## Languages
+
+The bot speaks 🇬🇧 English, 🇷🇺 Russian, 🇮🇳 Hindi and 🇮🇷 Persian.
+
+- **First contact:** the first `/start` in a private chat shows a flag picker. When the bot is added to a group, it posts the picker there. The choice is saved per chat.
+- **Changing it later:** use `/settings` → 🌐 Language, or `/language`. In groups, only group admins (and bot admins) can change it.
+- **Which language is used:** the chat's choice, then (in a group that hasn't chosen) the member's own choice, then their Telegram app language, then English.
+- **Command menu:** the "/" menu is localized too.
+- **Admin commands:** these reply in English.
+
+Translations live in `internal/i18n/catalog.go`. A test fails if any language is missing a message or uses different `%` placeholders from English.
+
 Admin commands:
 - `/stats` - bot analytics
 - `/health` - per-platform success rates (last 24h)
@@ -134,6 +149,13 @@ DOWNLY_TEST_DATABASE_URL=postgres://downly:downly@localhost:55432/downly go test
 ```
 
 The compression test runs when `ffmpeg` is installed.
+
+End-to-end tests (`internal/e2e`) run the real handlers, queue, worker and downloader together:
+- **Inputs:** Telegram updates go in through the real handlers.
+- **Fakes:** a fake Bot API server (`internal/tgtest`) stands in for Telegram, and a scripted stand-in replaces `yt-dlp`.
+- **Checks:** the uploaded file, its caption and the status messages in each language.
+
+They use the same `DOWNLY_TEST_DATABASE_URL` and need `bash`.
 
 ## Docker
 

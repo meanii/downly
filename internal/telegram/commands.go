@@ -11,12 +11,13 @@ import (
 
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/i18n"
 )
 
 func (h *handler) commandTable() map[string]commandFunc {
 	user := map[string]commandFunc{
 		"start":      h.cmdStart,
-		"help":       h.cmdStart,
+		"help":       h.cmdHelp,
 		"queue":      h.cmdQueue,
 		"history":    h.cmdHistory,
 		"cancel":     h.cmdCancel,
@@ -24,8 +25,10 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"setquality": h.cmdSetQuality,
 		"quality":    h.cmdQuality,
 		"playlist":   h.cmdPlaylist,
-		"priority": func(ctx context.Context, m *models.Message, _ string) {
-			h.reply(ctx, m.Chat.ID, "Priority queue exists. Admins can use /promote <job_id> and /demote <job_id>.")
+		"settings":   h.cmdSettings,
+		"language":   h.cmdLanguage,
+		"priority": func(ctx context.Context, r *request) {
+			h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "priority_info"))
 		},
 	}
 	admin := map[string]commandFunc{
@@ -34,8 +37,8 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"bandwidth": h.cmdBandwidth,
 		"users":     h.cmdUsers,
 		"jobs":      h.cmdJobs,
-		"promote":   func(ctx context.Context, m *models.Message, a string) { h.setPriority(ctx, m, a, 10) },
-		"demote":    func(ctx context.Context, m *models.Message, a string) { h.setPriority(ctx, m, a, 0) },
+		"promote":   func(ctx context.Context, r *request) { h.setPriority(ctx, r, 10) },
+		"demote":    func(ctx context.Context, r *request) { h.setPriority(ctx, r, 0) },
 		"broadcast": h.cmdBroadcast,
 		"ban":       h.cmdBan,
 		"unban":     h.cmdUnban,
@@ -47,125 +50,141 @@ func (h *handler) commandTable() map[string]commandFunc {
 }
 
 func (h *handler) adminOnly(fn commandFunc) commandFunc {
-	return func(ctx context.Context, m *models.Message, args string) {
-		if !isAdmin(h.cfg, m.From.ID) {
-			h.reply(ctx, m.Chat.ID, "Admin only command.")
+	return func(ctx context.Context, r *request) {
+		if !isAdmin(h.cfg, r.msg.From.ID) {
+			h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "admin_only"))
 			return
 		}
-		fn(ctx, m, args)
+		fn(ctx, r)
 	}
 }
 
-func (h *handler) cmdStart(ctx context.Context, m *models.Message, _ string) {
-	h.reply(ctx, m.Chat.ID, startMessage(getBotUsername(ctx, h.b)))
-}
-
-func startMessage(botUsername string) string {
-	return "Send me a media URL and I will queue it for download.\n" +
-		"You can send multiple URLs in one message.\n\n" +
-		"Commands:\n" +
-		"/start, /help - show usage\n" +
-		"/queue - show your active jobs\n" +
-		"/history - show past downloads\n" +
-		"/mp3 <url> - extract audio only\n" +
-		"/setquality - set your preferred video quality\n" +
-		"/quality <url> - choose quality for one download\n" +
-		"/playlist <url> [max] - download playlist (up to 25)\n" +
-		"/cancel <job_id> - cancel a job\n\n" +
-		"Inline mode: type @" + botUsername + " <url> in any chat.\n\n" +
-		"Admin commands:\n" +
-		"/stats - bot analytics\n" +
-		"/health - platform health dashboard\n" +
-		"/bandwidth [limit] - user bandwidth/storage report\n" +
-		"/users - list all users\n" +
-		"/jobs - active and pending jobs\n" +
-		"/promote, /demote <job_id> - change priority\n" +
-		"/broadcast <msg> - message all users\n" +
-		"/ban, /unban <user_id> - block/unblock user\n\n" +
-		"Repo: " + repoURL
-}
-
-func (h *handler) cmdQueue(ctx context.Context, m *models.Message, _ string) {
-	jobs, err := db.GetUserJobs(ctx, h.pool, m.From.ID, 10)
-	if err != nil {
-		h.log.Error("list user jobs failed", "user_id", m.From.ID, "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load your queue right now.")
+// cmdStart shows the language picker on first contact, help otherwise.
+func (h *handler) cmdStart(ctx context.Context, r *request) {
+	if _, chosen := h.storedLang(ctx, r.msg.Chat.ID); !chosen {
+		h.sendLanguagePicker(ctx, r.msg.Chat, originWelcome)
 		return
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatUserQueueSummary(jobs))
+	h.cmdHelp(ctx, r)
 }
 
-func (h *handler) cmdHistory(ctx context.Context, m *models.Message, _ string) {
-	jobs, err := db.GetUserHistory(ctx, h.pool, m.From.ID, 15)
+func (h *handler) cmdHelp(ctx context.Context, r *request) {
+	h.reply(ctx, r.msg.Chat.ID, h.helpText(ctx, r.lang, r.msg.From.ID))
+}
+
+// adminHelp is appended to the help for admins; admin tooling is English-only.
+const adminHelp = "Admin commands:\n" +
+	"/stats - bot analytics\n" +
+	"/health - platform health dashboard\n" +
+	"/bandwidth [limit] - user bandwidth/storage report\n" +
+	"/users - list all users\n" +
+	"/jobs - active and pending jobs\n" +
+	"/promote, /demote <job_id> - change priority\n" +
+	"/broadcast <msg> - message all users\n" +
+	"/ban, /unban <user_id> - block/unblock user"
+
+func (h *handler) helpText(ctx context.Context, lang i18n.Lang, userID int64) string {
+	text := i18n.T(lang, "start", getBotUsername(ctx, h.b))
+	if isAdmin(h.cfg, userID) {
+		text += "\n\n" + adminHelp
+	}
+	return text + "\n\nRepo: " + repoURL
+}
+
+func (h *handler) cmdQueue(ctx context.Context, r *request) {
+	jobs, err := db.GetUserJobs(ctx, h.pool, r.msg.From.ID, 10)
 	if err != nil {
-		h.log.Error("load history failed", "user_id", m.From.ID, "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load history.")
+		h.log.Error("list user jobs failed", "user_id", r.msg.From.ID, "error", err)
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "generic_error"))
 		return
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatUserHistory(jobs))
+	h.reply(ctx, r.msg.Chat.ID, formatUserQueue(r.lang, jobs))
 }
 
-func (h *handler) cmdCancel(ctx context.Context, m *models.Message, args string) {
-	chatID, userID := m.Chat.ID, m.From.ID
-	jobID, ok := parseJobID(args)
+func (h *handler) cmdHistory(ctx context.Context, r *request) {
+	jobs, err := db.GetUserHistory(ctx, h.pool, r.msg.From.ID, 15)
+	if err != nil {
+		h.log.Error("load history failed", "user_id", r.msg.From.ID, "error", err)
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "generic_error"))
+		return
+	}
+	h.reply(ctx, r.msg.Chat.ID, formatUserHistory(r.lang, jobs))
+}
+
+func (h *handler) cmdCancel(ctx context.Context, r *request) {
+	chatID, userID, lang := r.msg.Chat.ID, r.msg.From.ID, r.lang
+	jobID, ok := parseJobID(r.args)
 	if !ok {
-		h.reply(ctx, chatID, "Usage: /cancel <job_id>")
+		h.reply(ctx, chatID, i18n.T(lang, "cancel_usage"))
 		return
 	}
 	prev, err := db.CancelJob(ctx, h.pool, jobID, userID)
 	if err != nil {
 		h.log.Error("cancel job failed", "job_id", jobID, "error", err)
-		h.reply(ctx, chatID, "Failed to cancel job right now.")
+		h.reply(ctx, chatID, i18n.T(lang, "generic_error"))
 		return
 	}
 	switch prev {
 	case db.StatusPending:
-		h.reply(ctx, chatID, fmt.Sprintf("Canceled pending job #%d", jobID))
+		h.reply(ctx, chatID, i18n.T(lang, "canceled_pending", jobID))
 	case db.StatusProcessing:
 		// Stop it right away if it runs here; a worker in another instance
 		// notices the canceled status on its next heartbeat.
 		h.controller.Cancel(jobID)
-		h.reply(ctx, chatID, fmt.Sprintf("Canceled running job #%d", jobID))
+		h.reply(ctx, chatID, i18n.T(lang, "canceled_running", jobID))
 	default:
 		owns, _, err := db.OwnsJob(ctx, h.pool, jobID, userID)
 		switch {
 		case err != nil:
 			h.log.Error("inspect job failed", "job_id", jobID, "error", err)
-			h.reply(ctx, chatID, "Failed to inspect job right now.")
+			h.reply(ctx, chatID, i18n.T(lang, "generic_error"))
 		case !owns:
-			h.reply(ctx, chatID, "That job does not belong to you, or it does not exist.")
+			h.reply(ctx, chatID, i18n.T(lang, "cancel_not_yours"))
 		default:
-			h.reply(ctx, chatID, "That job has already finished.")
+			h.reply(ctx, chatID, i18n.T(lang, "cancel_finished"))
 		}
 	}
 }
 
-func (h *handler) cmdMP3(ctx context.Context, m *models.Message, args string) {
-	fields := strings.Fields(args)
+func (h *handler) cmdMP3(ctx context.Context, r *request) {
+	fields := strings.Fields(r.args)
 	if len(fields) < 1 {
-		h.reply(ctx, m.Chat.ID, "Usage: /mp3 <url>")
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "mp3_usage"))
 		return
 	}
 	url := normalizeURL(fields[0])
 	if !looksLikeURL(url) {
-		h.reply(ctx, m.Chat.ID, "Invalid URL.")
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "invalid_url"))
 		return
 	}
-	if !h.allowSubmit(ctx, m.Chat.ID, m.From.ID) {
+	if !h.allowSubmit(ctx, r.msg.Chat.ID, r.msg.From.ID, r.lang) {
 		return
 	}
-	_, _ = h.enqueue(ctx, m.Chat.ID, m.From.ID, "audio:"+url)
+	_, _ = h.enqueue(ctx, r.msg.Chat.ID, r.msg.From.ID, r.lang, "audio:"+url)
 }
 
-func (h *handler) cmdQuality(ctx context.Context, m *models.Message, args string) {
-	fields := strings.Fields(args)
+// Quality options for the one-off /quality picker.
+var qualityOptions = []struct {
+	Label    string // "" means the translated "Best"
+	Callback string
+}{
+	{"📱 Telegram", "telegram"},
+	{"360p", "q360"},
+	{"480p", "q480"},
+	{"720p", "q720"},
+	{"1080p", "q1080"},
+	{"", "qbest"},
+}
+
+func (h *handler) cmdQuality(ctx context.Context, r *request) {
+	fields := strings.Fields(r.args)
 	if len(fields) < 1 {
-		h.reply(ctx, m.Chat.ID, "Usage: /quality <url>\nI will ask you to pick a resolution before downloading.")
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "quality_usage"))
 		return
 	}
 	url := normalizeURL(fields[0])
 	if !isQueueableURL(url) {
-		h.reply(ctx, m.Chat.ID, "Invalid URL.")
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "invalid_url"))
 		return
 	}
 
@@ -173,62 +192,80 @@ func (h *handler) cmdQuality(ctx context.Context, m *models.Message, args string
 	token := pendingURLs.Put(url)
 	var buttons []models.InlineKeyboardButton
 	for _, q := range qualityOptions {
-		buttons = append(buttons, models.InlineKeyboardButton{Text: q.Label, CallbackData: qualityCallbackData(q.Callback, token)})
+		label := q.Label
+		if label == "" {
+			label = i18n.T(r.lang, "quality_best")
+		}
+		buttons = append(buttons, models.InlineKeyboardButton{Text: label, CallbackData: qualityCallbackData(q.Callback, token)})
 	}
 	if _, err := h.send(ctx, &bot.SendMessageParams{
-		ChatID:      m.Chat.ID,
-		Text:        "Pick quality for: " + trimURL(url),
+		ChatID:      r.msg.Chat.ID,
+		Text:        i18n.T(r.lang, "quality_pick", trimURL(url)),
 		ReplyMarkup: &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{buttons}},
 	}); err != nil {
 		h.log.Warn("send quality picker failed", "error", err)
 	}
 }
 
-// Quality preference options for /setquality
+// Quality preference options for /setquality.
 var qualityPreferences = []struct {
-	Label string
+	Label string // "" means the translated "Best (default)"
 	Value string
 }{
 	{"360p", "q360"},
 	{"480p", "q480"},
 	{"720p", "q720"},
 	{"1080p", "q1080"},
-	{"Best (default)", "best"},
+	{"", "best"},
 }
 
-func qualityPreferenceKeyboard(current string) *models.InlineKeyboardMarkup {
+// qualityPreferenceKeyboard lists the qualities with a check on current.
+// fromSettings adds a back button to the settings menu.
+func qualityPreferenceKeyboard(lang i18n.Lang, current string, fromSettings bool) *models.InlineKeyboardMarkup {
+	origin := ""
+	if fromSettings {
+		origin = ":" + originSettings
+	}
 	var rows [][]models.InlineKeyboardButton
 	for _, q := range qualityPreferences {
-		label := q.Label
+		label := qualityLabel(lang, q.Value)
 		if q.Value == current {
 			label = "✓ " + label
 		}
-		rows = append(rows, []models.InlineKeyboardButton{{Text: label, CallbackData: "sq:" + q.Value}})
+		rows = append(rows, []models.InlineKeyboardButton{{Text: label, CallbackData: "sq:" + q.Value + origin}})
+	}
+	if fromSettings {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: i18n.T(lang, "btn_back"), CallbackData: "set:home"}})
 	}
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func qualityLabel(value string) string {
+func qualityLabel(lang i18n.Lang, value string) string {
 	for _, q := range qualityPreferences {
-		if q.Value == value {
+		if q.Value == value && q.Label != "" {
 			return q.Label
 		}
 	}
-	return "Best"
+	return i18n.T(lang, "quality_best_default")
 }
 
-func (h *handler) cmdSetQuality(ctx context.Context, m *models.Message, _ string) {
-	current, err := db.GetUserQuality(ctx, h.pool, m.From.ID)
-	if err != nil {
-		h.log.Warn("load quality preference failed", "user_id", m.From.ID, "error", err)
-	}
+func (h *handler) cmdSetQuality(ctx context.Context, r *request) {
+	current := h.currentQuality(ctx, r.msg.From.ID)
 	if _, err := h.send(ctx, &bot.SendMessageParams{
-		ChatID:      m.Chat.ID,
-		Text:        fmt.Sprintf("Current quality: %s\nTap a button to set your preferred quality.\nIf unavailable, it falls back to lower resolutions automatically.", qualityLabel(current)),
-		ReplyMarkup: qualityPreferenceKeyboard(current),
+		ChatID:      r.msg.Chat.ID,
+		Text:        i18n.T(r.lang, "quality_current", qualityLabel(r.lang, current)),
+		ReplyMarkup: qualityPreferenceKeyboard(r.lang, current, false),
 	}); err != nil {
 		h.log.Warn("send quality preferences failed", "error", err)
 	}
+}
+
+func (h *handler) currentQuality(ctx context.Context, userID int64) string {
+	q, err := db.GetUserQuality(ctx, h.pool, userID)
+	if err != nil {
+		h.log.Warn("load quality preference failed", "user_id", userID, "error", err)
+	}
+	return q
 }
 
 const (
@@ -236,16 +273,16 @@ const (
 	playlistMax     = 25
 )
 
-func (h *handler) cmdPlaylist(ctx context.Context, m *models.Message, args string) {
-	chatID, userID := m.Chat.ID, m.From.ID
-	fields := strings.Fields(args)
+func (h *handler) cmdPlaylist(ctx context.Context, r *request) {
+	chatID, userID, lang := r.msg.Chat.ID, r.msg.From.ID, r.lang
+	fields := strings.Fields(r.args)
 	if len(fields) < 1 {
-		h.reply(ctx, chatID, fmt.Sprintf("Usage: /playlist <url> [max]\nFetches playlist entries and queues them for download.\nOptional: max number of videos (default %d, max %d).", playlistDefault, playlistMax))
+		h.reply(ctx, chatID, i18n.T(lang, "playlist_usage", playlistDefault, playlistMax))
 		return
 	}
 	url := normalizeURL(fields[0])
 	if !isQueueableURL(url) {
-		h.reply(ctx, chatID, "Invalid URL.")
+		h.reply(ctx, chatID, i18n.T(lang, "invalid_url"))
 		return
 	}
 	requested := playlistDefault
@@ -256,7 +293,7 @@ func (h *handler) cmdPlaylist(ctx context.Context, m *models.Message, args strin
 	}
 	requested = min(requested, playlistMax)
 
-	if !h.allowSubmit(ctx, chatID, userID) {
+	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
 
@@ -265,11 +302,11 @@ func (h *handler) cmdPlaylist(ctx context.Context, m *models.Message, args strin
 	room, err := db.QueueRoom(ctx, h.pool, userID, h.limitsFor(userID))
 	if err != nil {
 		h.log.Error("queue room check failed", "user_id", userID, "error", err)
-		h.reply(ctx, chatID, "Failed to check your queue right now.")
+		h.reply(ctx, chatID, i18n.T(lang, "generic_error"))
 		return
 	}
 	if room == 0 {
-		h.reply(ctx, chatID, "Your queue is full (or you reached your daily limit). Wait for some downloads to finish, then try again.")
+		h.reply(ctx, chatID, i18n.T(lang, "playlist_full"))
 		return
 	}
 	want := requested
@@ -277,25 +314,25 @@ func (h *handler) cmdPlaylist(ctx context.Context, m *models.Message, args strin
 		want = min(want, room)
 	}
 
-	h.reply(ctx, chatID, "Fetching playlist info... this may take a moment.")
+	h.reply(ctx, chatID, i18n.T(lang, "playlist_fetching"))
 	dl := downloader.YTDLP{Bin: h.cfg.Downly.Services.YTDLP.Bin, CookiesFile: h.cfg.Downly.Services.YTDLP.CookiesFile, Logger: h.log}
 	entries, playlistTitle, err := dl.FetchPlaylist(ctx, url, want)
 	if err != nil {
 		h.log.Warn("fetch playlist failed", "url", url, "error", err)
-		h.reply(ctx, chatID, "Failed to fetch playlist: "+truncateStr(err.Error(), 200))
+		h.reply(ctx, chatID, i18n.T(lang, "playlist_fetch_failed", truncateStr(err.Error(), 200)))
 		return
 	}
 	if len(entries) == 0 {
-		h.reply(ctx, chatID, "No entries found in this playlist. It might be a single video — just send the URL directly.")
+		h.reply(ctx, chatID, i18n.T(lang, "playlist_empty"))
 		return
 	}
 
-	summary := fmt.Sprintf("Playlist: %s\nQueueing %d entries:\n", truncateStr(playlistTitle, 80), len(entries))
+	summary := i18n.T(lang, "playlist_summary", truncateStr(playlistTitle, 80), len(entries)) + "\n"
 	for i, e := range entries {
 		summary += fmt.Sprintf("\n%d. %s", i+1, truncateStr(e.Title, 60))
 	}
 	if room > 0 && room < requested {
-		summary += fmt.Sprintf("\n\nOnly %d of %d requested fit within your queue/daily limits.", room, requested)
+		summary += "\n\n" + i18n.T(lang, "playlist_partial", room, requested)
 	}
 	h.reply(ctx, chatID, summary)
 
@@ -306,7 +343,7 @@ func (h *handler) cmdPlaylist(ctx context.Context, m *models.Message, args strin
 		if quality != "" {
 			u = quality + ":" + u
 		}
-		if _, err := h.enqueue(ctx, chatID, userID, u); err != nil {
+		if _, err := h.enqueue(ctx, chatID, userID, lang, u); err != nil {
 			if _, isLimit := db.IsLimit(err); isLimit {
 				break
 			}
@@ -314,16 +351,16 @@ func (h *handler) cmdPlaylist(ctx context.Context, m *models.Message, args strin
 		}
 		queued++
 	}
-	h.reply(ctx, chatID, fmt.Sprintf("Queued %d of %d videos from playlist.", queued, len(entries)))
+	h.reply(ctx, chatID, i18n.T(lang, "playlist_done", queued, len(entries)))
 }
 
-// --- Admin ---
+// --- Admin (English-only output) ---
 
-func (h *handler) cmdStats(ctx context.Context, m *models.Message, _ string) {
+func (h *handler) cmdStats(ctx context.Context, r *request) {
 	stats, err := db.GetBotStats(ctx, h.pool)
 	if err != nil {
 		h.log.Error("load stats failed", "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load stats.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to load stats.")
 		return
 	}
 	topUsers, err := db.GetTopUsers(ctx, h.pool, 5)
@@ -334,22 +371,22 @@ func (h *handler) cmdStats(ctx context.Context, m *models.Message, _ string) {
 	if err != nil {
 		h.log.Warn("load top platforms failed", "error", err)
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatBotStats(stats, topUsers, topPlatforms))
+	h.reply(ctx, r.msg.Chat.ID, db.FormatBotStats(stats, topUsers, topPlatforms))
 }
 
-func (h *handler) cmdHealth(ctx context.Context, m *models.Message, _ string) {
+func (h *handler) cmdHealth(ctx context.Context, r *request) {
 	platforms, err := db.GetPlatformHealth(ctx, h.pool, 24, 15)
 	if err != nil {
 		h.log.Error("load platform health failed", "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load platform health.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to load platform health.")
 		return
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatPlatformHealth(platforms, 24))
+	h.reply(ctx, r.msg.Chat.ID, db.FormatPlatformHealth(platforms, 24))
 }
 
-func (h *handler) cmdBandwidth(ctx context.Context, m *models.Message, args string) {
+func (h *handler) cmdBandwidth(ctx context.Context, r *request) {
 	limit := 20
-	if fields := strings.Fields(args); len(fields) > 0 {
+	if fields := strings.Fields(r.args); len(fields) > 0 {
 		if n, err := strconv.Atoi(fields[0]); err == nil && n > 0 {
 			limit = min(n, 100)
 		}
@@ -357,49 +394,49 @@ func (h *handler) cmdBandwidth(ctx context.Context, m *models.Message, args stri
 	users, err := db.GetUserBandwidth(ctx, h.pool, limit)
 	if err != nil {
 		h.log.Error("load bandwidth failed", "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load bandwidth data.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to load bandwidth data.")
 		return
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatUserBandwidth(users))
+	h.reply(ctx, r.msg.Chat.ID, db.FormatUserBandwidth(users))
 }
 
-func (h *handler) cmdUsers(ctx context.Context, m *models.Message, _ string) {
+func (h *handler) cmdUsers(ctx context.Context, r *request) {
 	users, err := db.GetAllUsers(ctx, h.pool, 25)
 	if err != nil {
 		h.log.Error("load users failed", "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load user list.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to load user list.")
 		return
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatUserList(users))
+	h.reply(ctx, r.msg.Chat.ID, db.FormatUserList(users))
 }
 
-func (h *handler) cmdJobs(ctx context.Context, m *models.Message, _ string) {
+func (h *handler) cmdJobs(ctx context.Context, r *request) {
 	jobs, err := db.GetActiveJobs(ctx, h.pool, 20)
 	if err != nil {
 		h.log.Error("load active jobs failed", "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to load job list.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to load job list.")
 		return
 	}
-	h.reply(ctx, m.Chat.ID, db.FormatActiveJobs(jobs))
+	h.reply(ctx, r.msg.Chat.ID, db.FormatActiveJobs(jobs))
 }
 
-func (h *handler) setPriority(ctx context.Context, m *models.Message, args string, priority int) {
-	jobID, ok := parseJobID(args)
+func (h *handler) setPriority(ctx context.Context, r *request, priority int) {
+	jobID, ok := parseJobID(r.args)
 	if !ok {
-		h.reply(ctx, m.Chat.ID, "Usage: /promote <job_id> or /demote <job_id>")
+		h.reply(ctx, r.msg.Chat.ID, "Usage: /promote <job_id> or /demote <job_id>")
 		return
 	}
 	updated, err := db.UpdatePriority(ctx, h.pool, jobID, priority)
 	if err != nil {
 		h.log.Error("update priority failed", "job_id", jobID, "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to update priority right now.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to update priority right now.")
 		return
 	}
 	if !updated {
-		h.reply(ctx, m.Chat.ID, "Only pending jobs can have priority changed.")
+		h.reply(ctx, r.msg.Chat.ID, "Only pending jobs can have priority changed.")
 		return
 	}
-	h.reply(ctx, m.Chat.ID, fmt.Sprintf("Updated priority for job #%d to %d", jobID, priority))
+	h.reply(ctx, r.msg.Chat.ID, fmt.Sprintf("Updated priority for job #%d to %d", jobID, priority))
 }
 
 func parseUserID(args string) (int64, string, bool) {
@@ -414,41 +451,41 @@ func parseUserID(args string) (int64, string, bool) {
 	return id, strings.Join(fields[1:], " "), true
 }
 
-func (h *handler) cmdBan(ctx context.Context, m *models.Message, args string) {
-	targetID, reason, ok := parseUserID(args)
+func (h *handler) cmdBan(ctx context.Context, r *request) {
+	targetID, reason, ok := parseUserID(r.args)
 	if !ok {
-		h.reply(ctx, m.Chat.ID, "Usage: /ban <user_id> [reason]")
+		h.reply(ctx, r.msg.Chat.ID, "Usage: /ban <user_id> [reason]")
 		return
 	}
 	if isAdmin(h.cfg, targetID) {
-		h.reply(ctx, m.Chat.ID, "Admins cannot be banned.")
+		h.reply(ctx, r.msg.Chat.ID, "Admins cannot be banned.")
 		return
 	}
 	if err := db.BanUser(ctx, h.pool, targetID, reason); err != nil {
 		h.log.Error("ban user failed", "target_id", targetID, "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to ban user.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to ban user.")
 		return
 	}
-	h.log.Info("user banned", "target_id", targetID, "by", m.From.ID, "reason", reason)
-	h.reply(ctx, m.Chat.ID, fmt.Sprintf("Banned user %d.", targetID))
+	h.log.Info("user banned", "target_id", targetID, "by", r.msg.From.ID, "reason", reason)
+	h.reply(ctx, r.msg.Chat.ID, fmt.Sprintf("Banned user %d.", targetID))
 }
 
-func (h *handler) cmdUnban(ctx context.Context, m *models.Message, args string) {
-	targetID, _, ok := parseUserID(args)
+func (h *handler) cmdUnban(ctx context.Context, r *request) {
+	targetID, _, ok := parseUserID(r.args)
 	if !ok {
-		h.reply(ctx, m.Chat.ID, "Usage: /unban <user_id>")
+		h.reply(ctx, r.msg.Chat.ID, "Usage: /unban <user_id>")
 		return
 	}
 	removed, err := db.UnbanUser(ctx, h.pool, targetID)
 	if err != nil {
 		h.log.Error("unban user failed", "target_id", targetID, "error", err)
-		h.reply(ctx, m.Chat.ID, "Failed to unban user.")
+		h.reply(ctx, r.msg.Chat.ID, "Failed to unban user.")
 		return
 	}
 	if !removed {
-		h.reply(ctx, m.Chat.ID, "User was not banned.")
+		h.reply(ctx, r.msg.Chat.ID, "User was not banned.")
 		return
 	}
-	h.log.Info("user unbanned", "target_id", targetID, "by", m.From.ID)
-	h.reply(ctx, m.Chat.ID, fmt.Sprintf("Unbanned user %d.", targetID))
+	h.log.Info("user unbanned", "target_id", targetID, "by", r.msg.From.ID)
+	h.reply(ctx, r.msg.Chat.ID, fmt.Sprintf("Unbanned user %d.", targetID))
 }

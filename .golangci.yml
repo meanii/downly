@@ -5,3 +5,9 @@ linters:
     presets:
       # Unchecked errors from deferred Close/Flush/os.Remove are idiomatic.
       - std-error-handling
+    rules:
+      # Persian needs zero-width non-joiners (U+200C) and direction marks;
+      # escaping them would make the translations unreadable to translators.
+      - path: internal/i18n/catalog.go
+        linters: [staticcheck]
+        text: "ST1018"

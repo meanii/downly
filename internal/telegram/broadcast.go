@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/tgutil"
@@ -55,7 +54,8 @@ func runBroadcast(ctx context.Context, chatIDs []int64, interval time.Duration, 
 	return res
 }
 
-func (h *handler) cmdBroadcast(ctx context.Context, m *models.Message, msg string) {
+func (h *handler) cmdBroadcast(ctx context.Context, r *request) {
+	m, msg := r.msg, r.args
 	if msg == "" {
 		h.reply(ctx, m.Chat.ID, "Usage: /broadcast <message>")
 		return

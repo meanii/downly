@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/go-telegram/bot"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/i18n"
 	"github.com/meanii/downly/internal/safeurl"
 )
 
@@ -25,80 +25,89 @@ func callbackChat(cb *models.CallbackQuery) int64 {
 // onQualityCallback handles "dl:<quality>:<token>" from /quality buttons.
 func (h *handler) onQualityCallback(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	cb := update.CallbackQuery
+	userID, chatID := cb.From.ID, callbackChat(cb)
+	lang := h.langFor(ctx, chatID, &cb.From)
+
 	data := strings.TrimPrefix(cb.Data, "dl:")
 	quality, token, found := strings.Cut(data, ":")
 	if !found {
-		h.answerCallback(ctx, cb.ID, "Invalid button.")
+		h.answerCallback(ctx, cb.ID, i18n.T(lang, "button_invalid"))
 		return
 	}
 	// Callback data comes from the client and can be forged; trust nothing.
 	if !downloader.ValidQuality(quality) {
-		h.answerCallback(ctx, cb.ID, "Unknown quality.")
+		h.answerCallback(ctx, cb.ID, i18n.T(lang, "quality_unknown"))
 		return
 	}
 	url, ok := pendingURLs.Get(token)
 	if !ok {
-		h.answerCallback(ctx, cb.ID, "This button has expired. Send the link again.")
+		h.answerCallback(ctx, cb.ID, i18n.T(lang, "button_expired"))
 		return
 	}
 	if _, err := safeurl.Validate(url); err != nil {
-		h.answerCallback(ctx, cb.ID, "Invalid URL.")
+		h.answerCallback(ctx, cb.ID, i18n.T(lang, "invalid_url"))
 		return
 	}
-	h.answerCallback(ctx, cb.ID, "Downloading at "+quality+"...")
+	label := quality
+	if quality == "qbest" || quality == "best" {
+		label = i18n.T(lang, "quality_best")
+	}
+	h.answerCallback(ctx, cb.ID, i18n.T(lang, "downloading_at", label))
 
-	userID, chatID := cb.From.ID, callbackChat(cb)
-	if !h.allowSubmit(ctx, chatID, userID) {
+	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
 	queued := url
 	if quality != "qbest" && quality != "best" {
 		queued = quality + ":" + url
 	}
-	_, _ = h.enqueue(ctx, chatID, userID, queued)
+	_, _ = h.enqueue(ctx, chatID, userID, lang, queued)
 }
 
-// onSetQualityCallback handles "sq:<value>" from /setquality buttons.
+// onSetQualityCallback handles "sq:<value>[:s]" from quality preference
+// buttons; the ":s" suffix means it was opened from the settings menu.
 func (h *handler) onSetQualityCallback(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	cb := update.CallbackQuery
-	quality := strings.TrimPrefix(cb.Data, "sq:")
+	lang := h.langFor(ctx, callbackChat(cb), &cb.From)
+	quality, origin, _ := strings.Cut(strings.TrimPrefix(cb.Data, "sq:"), ":")
 	if !isPreferenceValue(quality) {
-		h.answerCallback(ctx, cb.ID, "Unknown quality.")
+		h.answerCallback(ctx, cb.ID, i18n.T(lang, "quality_unknown"))
 		return
 	}
 	if err := db.SetUserQuality(ctx, h.pool, cb.From.ID, quality); err != nil {
 		h.log.Error("save quality preference failed", "user_id", cb.From.ID, "error", err)
-		h.answerCallback(ctx, cb.ID, "Failed to save preference.")
+		h.answerCallback(ctx, cb.ID, i18n.T(lang, "quality_save_failed"))
 		return
 	}
-	label := qualityLabel(quality)
-	h.answerCallback(ctx, cb.ID, "Quality set to "+label)
+	label := qualityLabel(lang, quality)
+	h.answerCallback(ctx, cb.ID, i18n.T(lang, "quality_set_toast", label))
 
-	if m := cb.Message.Message; m != nil {
-		_, err := h.b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:      m.Chat.ID,
-			MessageID:   m.ID,
-			Text:        fmt.Sprintf("Quality preference saved: %s\nAll your downloads will now use this setting. If unavailable, it falls back to lower resolutions automatically.", label),
-			ReplyMarkup: qualityPreferenceKeyboard(quality),
-		})
-		if err != nil && !strings.Contains(err.Error(), "message is not modified") {
-			h.log.Warn("edit quality picker failed", "error", err)
-		}
+	m := cb.Message.Message
+	if m == nil {
+		return
 	}
+	if origin == originSettings {
+		text, kb := h.settingsView(ctx, lang, m.Chat, cb.From.ID)
+		h.editMarkup(ctx, m, text, kb)
+		return
+	}
+	h.editMarkup(ctx, m, i18n.T(lang, "quality_saved", label), qualityPreferenceKeyboard(lang, quality, false))
 }
 
-// Inline result IDs and the job prefix each one queues.
+// Inline result IDs, their title keys and the job prefix each one queues.
 var inlineResults = []struct {
-	ID, Title, Label, Prefix string
+	ID, TitleKey, Prefix string
 }{
-	{"dl_best", "Download (best quality)", "best quality", ""},
-	{"dl_720", "Download (720p)", "720p", "q720:"},
-	{"dl_480", "Download (480p)", "480p", "q480:"},
-	{"dl_mp3", "Download (audio only)", "audio", "audio:"},
+	{"dl_best", "inline_title_best", ""},
+	{"dl_720", "inline_title_720", "q720:"},
+	{"dl_480", "inline_title_480", "q480:"},
+	{"dl_mp3", "inline_title_audio", "audio:"},
 }
 
 func (h *handler) onInlineQuery(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	iq := update.InlineQuery
+	// Inline queries have no chat; use the user's own (private chat) setting.
+	lang := h.langFor(ctx, iq.From.ID, iq.From)
 	botUser := getBotUsername(ctx, h.b)
 	query := strings.TrimSpace(iq.Query)
 
@@ -108,10 +117,10 @@ func (h *handler) onInlineQuery(ctx context.Context, _ *bot.Bot, update *models.
 	case query == "" || !looksLikeURL(url):
 		results = []models.InlineQueryResult{&models.InlineQueryResultArticle{
 			ID:          "help",
-			Title:       "Downly - Media Downloader",
-			Description: "Paste a URL to queue a download",
+			Title:       i18n.T(lang, "inline_help_title"),
+			Description: i18n.T(lang, "inline_help_desc"),
 			InputMessageContent: &models.InputTextMessageContent{
-				MessageText: "Send a media URL to @" + botUser + " to download it.",
+				MessageText: i18n.T(lang, "inline_help_text", botUser),
 			},
 		}}
 	case !isQueueableURL(url):
@@ -126,10 +135,10 @@ func (h *handler) onInlineQuery(ctx context.Context, _ *bot.Bot, update *models.
 		for _, r := range inlineResults {
 			results = append(results, &models.InlineQueryResultArticle{
 				ID:          r.ID,
-				Title:       r.Title,
+				Title:       i18n.T(lang, r.TitleKey),
 				Description: short,
 				InputMessageContent: &models.InputTextMessageContent{
-					MessageText: fmt.Sprintf("Downloading %s via @%s (%s)", short, botUser, r.Label),
+					MessageText: i18n.T(lang, "inline_msg", short, botUser),
 				},
 			})
 		}
@@ -151,6 +160,7 @@ func (h *handler) onChosenInlineResult(ctx context.Context, _ *bot.Bot, update *
 	chosen := update.ChosenInlineResult
 	userID := chosen.From.ID
 	chatID := userID // deliver download to user's DM
+	lang := h.langFor(ctx, chatID, &chosen.From)
 	url := normalizeURL(strings.TrimSpace(chosen.Query))
 	if !looksLikeURL(url) {
 		return
@@ -161,8 +171,8 @@ func (h *handler) onChosenInlineResult(ctx context.Context, _ *bot.Bot, update *
 			prefix = r.Prefix
 		}
 	}
-	if !h.allowSubmit(ctx, chatID, userID) {
+	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
-	_, _ = h.enqueue(ctx, chatID, userID, prefix+url)
+	_, _ = h.enqueue(ctx, chatID, userID, lang, prefix+url)
 }
