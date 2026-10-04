@@ -50,6 +50,7 @@ type Job struct {
 	CacheKey        string
 	Cached          bool
 	InlineMessageID string
+	ReplyTo         int64
 	CreatedAt       time.Time
 	StartedAt       *time.Time
 	FinishedAt      *time.Time
@@ -68,6 +69,8 @@ type NewJob struct {
 	CacheKey string
 	// InlineMessageID is set for inline-mode requests.
 	InlineMessageID string
+	// ReplyTo is the message the job answers (0 = none).
+	ReplyTo int64
 }
 
 type QueueStats struct {
@@ -79,14 +82,14 @@ type QueueStats struct {
 // jobColumns and scanJob keep every full-row query in sync.
 const jobColumns = `id, chat_id, user_id, url, mode, quality, platform, status, priority, output_path, output_name,
 	error_message, retry_count, telegram_message_id, progress_text, progress_percent, cache_key, cached,
-	inline_message_id, created_at, started_at, finished_at`
+	inline_message_id, reply_to_message_id, created_at, started_at, finished_at`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var job Job
 	err := row.Scan(&job.ID, &job.ChatID, &job.UserID, &job.URL, &job.Mode, &job.Quality, &job.Platform, &job.Status,
 		&job.Priority, &job.OutputPath, &job.OutputName, &job.ErrorMessage, &job.RetryCount, &job.TelegramMsgID,
 		&job.ProgressText, &job.ProgressPercent, &job.CacheKey, &job.Cached, &job.InlineMessageID,
-		&job.CreatedAt, &job.StartedAt, &job.FinishedAt)
+		&job.ReplyTo, &job.CreatedAt, &job.StartedAt, &job.FinishedAt)
 	return job, err
 }
 
@@ -114,10 +117,10 @@ func InsertJob(ctx context.Context, pool *pgxpool.Pool, j NewJob) (int64, error)
 	var jobID int64
 	err := pool.QueryRow(ctx, `
 		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
-			progress_text, progress_percent, cache_key, inline_message_id)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10)
+			progress_text, progress_percent, cache_key, inline_message_id, reply_to_message_id)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10, $11)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID).Scan(&jobID)
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID, j.ReplyTo).Scan(&jobID)
 	return jobID, err
 }
 

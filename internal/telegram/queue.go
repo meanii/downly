@@ -44,6 +44,7 @@ func (h *handler) enqueue(ctx context.Context, d download) (int64, error) {
 		ChatID: d.chatID, UserID: d.userID, URL: cleanURL, Mode: mode, Quality: quality,
 		CacheKey:        media.CacheKey(cleanURL, string(mode), quality, ""),
 		InlineMessageID: d.inlineMessageID,
+		ReplyTo:         int64(d.replyTo),
 	}
 
 	if id, ok := h.serveFromCache(ctx, d, job); ok {

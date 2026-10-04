@@ -64,8 +64,16 @@ func (h *handler) sendLanguagePicker(ctx context.Context, chat models.Chat, orig
 func (h *handler) settingsView(ctx context.Context, lang i18n.Lang, chat models.Chat, userID int64) (string, *models.InlineKeyboardMarkup) {
 	langBtn := models.InlineKeyboardButton{Text: i18n.T(lang, "btn_language"), CallbackData: "set:lang"}
 	if chat.Type != models.ChatTypePrivate {
-		return i18n.T(lang, "settings_title_group", i18n.Label(lang)),
-			&models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{langBtn}}}
+		mode, err := db.GetGroupMode(ctx, h.pool, chat.ID)
+		if err != nil {
+			h.log.Warn("load group mode failed", "chat_id", chat.ID, "error", err)
+		}
+		links := groupModeLabel(lang, mode)
+		return i18n.T(lang, "settings_title_group", i18n.Label(lang)) + "\n" + i18n.T(lang, "settings_links_line", links),
+			&models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+				{langBtn},
+				{{Text: i18n.T(lang, "btn_group_links", links), CallbackData: "set:gmode"}},
+			}}
 	}
 	quality := qualityLabel(lang, h.currentQuality(ctx, userID))
 	return i18n.T(lang, "settings_title", i18n.Label(lang), quality),
@@ -155,6 +163,24 @@ func (h *handler) onSettingsCallback(ctx context.Context, _ *bot.Bot, update *mo
 		case "lang":
 			current, _ := h.storedLang(ctx, chat.ID)
 			h.editMarkup(ctx, m, i18n.PickerPrompt(), languageKeyboard(lang, current, originSettings))
+		case "gmode":
+			if !h.canManage(ctx, chat, cb.From.ID) {
+				h.answerCallback(ctx, cb.ID, i18n.T(lang, "lang_group_admins_only"))
+				return
+			}
+			mode, _ := db.GetGroupMode(ctx, h.pool, chat.ID)
+			next := db.GroupModeCommand
+			if mode == db.GroupModeCommand {
+				next = db.GroupModeAuto
+			}
+			if err := db.SetGroupMode(ctx, h.pool, chat.ID, next); err != nil {
+				h.log.Error("save group mode failed", "chat_id", chat.ID, "error", err)
+				h.answerCallback(ctx, cb.ID, i18n.T(lang, "generic_error"))
+				return
+			}
+			h.log.Info("group mode set", "chat_id", chat.ID, "user_id", cb.From.ID, "mode", next)
+			text, kb := h.settingsView(ctx, lang, chat, cb.From.ID)
+			h.editMarkup(ctx, m, text, kb)
 		case "quality":
 			current := h.currentQuality(ctx, cb.From.ID)
 			h.editMarkup(ctx, m, i18n.T(lang, "quality_current", qualityLabel(lang, current)), qualityPreferenceKeyboard(lang, current, true))
@@ -193,7 +219,14 @@ func (h *handler) onMyChatMember(ctx context.Context, _ *bot.Bot, update *models
 
 // --- Command menus ---
 
-var menuCommands = []string{"start", "queue", "history", "mp3", "quality", "setquality", "playlist", "cancel", "settings"}
+var menuCommands = []string{"start", "dl", "queue", "history", "mp3", "quality", "setquality", "playlist", "cancel", "settings"}
+
+func groupModeLabel(lang i18n.Lang, mode string) string {
+	if mode == db.GroupModeCommand {
+		return i18n.T(lang, "group_links_command")
+	}
+	return i18n.T(lang, "group_links_auto")
+}
 
 func commandMenu(lang i18n.Lang) []models.BotCommand {
 	cmds := make([]models.BotCommand, 0, len(menuCommands))

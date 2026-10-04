@@ -47,6 +47,7 @@ done
 if [ -z "$url" ]; then echo "ERROR: URL must come after --" >&2; exit 2; fi
 case "$url" in
   *private*) echo "ERROR: [youtube] vid42: Private video. Sign in if you've been granted access" >&2; exit 1 ;;
+  *unsupported*) echo "ERROR: Unsupported URL: $url" >&2; exit 1 ;;
 esac
 if [ $dump = 1 ]; then
   printf '%s\n' '{"extractor_key":"Youtube","title":"E2E Видео","id":"vid42","duration":65}'
@@ -161,17 +162,23 @@ func (e *env) downloads() int {
 
 var updateID int64
 
-func (e *env) send(chat models.Chat, userID int64, text string) {
+// send delivers a text message and returns its message ID.
+func (e *env) send(chat models.Chat, userID int64, text string) int {
+	return e.sendReply(chat, userID, text, nil)
+}
+
+// sendReply delivers a message answering replyTo (nil = not a reply).
+func (e *env) sendReply(chat models.Chat, userID int64, text string, replyTo *models.Message) int {
 	updateID++
-	e.b.ProcessUpdate(context.Background(), &models.Update{
-		ID: updateID,
-		Message: &models.Message{
-			ID:   int(updateID),
-			From: &models.User{ID: userID, FirstName: "U"},
-			Chat: chat,
-			Text: text,
-		},
-	})
+	msg := &models.Message{
+		ID:             int(updateID),
+		From:           &models.User{ID: userID, FirstName: "U"},
+		Chat:           chat,
+		Text:           text,
+		ReplyToMessage: replyTo,
+	}
+	e.b.ProcessUpdate(context.Background(), &models.Update{ID: updateID, Message: msg})
+	return msg.ID
 }
 
 func (e *env) press(chat models.Chat, userID int64, data string) {

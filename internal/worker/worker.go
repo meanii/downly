@@ -143,6 +143,7 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 			return formatProgressMessage(lang, job.ID, job.Status, text, percent, 0, 1, job.Priority)
 		},
 	)
+	progress.quiet = isGroupChat(job.ChatID)
 	progress.Force(job.ProgressText, job.ProgressPercent)
 
 	dlCtx, cancelDL := context.WithTimeout(runCtx, w.jobTimeout())
@@ -177,7 +178,7 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 
 	progress.Force("Uploading to Telegram", 99)
 	meta := MetaFromResult(res, size)
-	items, err := uploadWithRetry(runCtx, w.Msg, job.ChatID, res, SendOptions{Caption: Caption(lang, meta)}, size)
+	items, err := uploadWithRetry(runCtx, w.Msg, job.ChatID, res, SendOptions{Caption: Caption(lang, meta), ReplyTo: int(job.ReplyTo)}, size)
 	if runCtx.Err() != nil && w.handleInterrupted(workCtx, runCtx, log, job, lang) {
 		return
 	}
@@ -201,7 +202,12 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 	}
 	w.remember(fctx, log, job, items, meta)
 	w.finishInline(fctx, log, job, lang, items, meta)
-	w.editFinal(fctx, job, formatDoneMessage(lang, job.ID, res))
+	if isGroupChat(job.ChatID) {
+		// The media itself answers the link; the status message is clutter.
+		w.deleteStatus(fctx, log, job)
+	} else {
+		w.editFinal(fctx, job, formatDoneMessage(lang, job.ID, res))
+	}
 	w.count("done")
 	log.Info("job finished", "platform", res.Platform, "file_name", res.FileName)
 }
@@ -292,6 +298,12 @@ func (w *Worker) fail(workCtx context.Context, log *slog.Logger, job *db.Job, la
 	if dbErr := db.MarkFailed(fctx, w.Pool, job.ID, truncate(err.Error())); dbErr != nil {
 		log.Error("mark failed failed", "error", dbErr)
 	}
+	if isGroupChat(job.ChatID) && isNotMedia(err) {
+		// Groups post plenty of ordinary links; don't answer them with errors.
+		w.deleteStatus(fctx, log, job)
+		w.count("failed")
+		return
+	}
 	w.editFinal(fctx, job, formatFailureMessage(lang, job.ID, userMsg))
 	if job.InlineMessageID != "" {
 		if err := w.Msg.EditInlineText(fctx, job.InlineMessageID, "❌ "+userMsg); err != nil {
@@ -361,6 +373,16 @@ func (w *Worker) checkSizes(log *slog.Logger, res *downloader.Result) (total, to
 	}
 	res.More = kept
 	return total, 0, nil
+}
+
+// isGroupChat reports whether chatID is a group or supergroup (Telegram
+// gives those negative IDs).
+func isGroupChat(chatID int64) bool { return chatID < 0 }
+
+func (w *Worker) deleteStatus(ctx context.Context, log *slog.Logger, job *db.Job) {
+	if err := w.Msg.Delete(ctx, job.ChatID, int(job.TelegramMsgID)); err != nil {
+		log.Warn("delete status message failed", "error", err)
+	}
 }
 
 // remember stores the uploaded file IDs so the same request is served

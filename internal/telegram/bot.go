@@ -105,8 +105,27 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 	if len(urls) == 0 {
 		return
 	}
+	if isGroup(msg.Chat) {
+		mode, err := db.GetGroupMode(ctx, h.pool, msg.Chat.ID)
+		if err != nil {
+			h.log.Warn("load group mode failed", "chat_id", msg.Chat.ID, "error", err)
+		}
+		if mode == db.GroupModeCommand {
+			return // this group only downloads via /dl
+		}
+	}
+	h.downloadAll(ctx, msg, urls, msg.ID)
+}
+
+// downloadAll queues every URL from msg. In groups the bot answers
+// replyTo (the message holding the links); in private chats it doesn't
+// thread replies.
+func (h *handler) downloadAll(ctx context.Context, msg *models.Message, urls []string, replyTo int) {
 	chatID, userID := msg.Chat.ID, msg.From.ID
 	lang := h.langFor(ctx, chatID, msg.From)
+	if !isGroup(msg.Chat) {
+		replyTo = 0
+	}
 	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
@@ -116,12 +135,16 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
 			url = quality + ":" + url
 		}
-		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: url}); err != nil {
+		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: url, replyTo: replyTo}); err != nil {
 			// Limit and validation errors were already reported; stop on the
 			// first so a long list does not produce a wall of errors.
 			return
 		}
 	}
+}
+
+func isGroup(chat models.Chat) bool {
+	return chat.Type == models.ChatTypeGroup || chat.Type == models.ChatTypeSupergroup
 }
 
 // parseCommand splits "/name@bot args" into ("name", "args"). ok is false
