@@ -106,7 +106,7 @@ func main() {
 
 	controller := worker.NewController()
 	tgbot.RegisterHandlers(logger, cfg, controller, b, pool)
-	go tgbot.SetCommandMenus(ctx, b, logger.With("component", "telegram"))
+	go tgbot.SetCommandMenus(ctx, b, logger.With("component", "telegram"), cfg.Downly.Premium.Enabled)
 
 	// Anything in the work dir older than one job timeout is from a crash.
 	worker.SweepWorkDir(logger, cfg.Downly.Worker.WorkDir, time.Duration(cfg.Downly.Worker.JobTimeoutMinutes)*time.Minute)
