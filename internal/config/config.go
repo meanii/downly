@@ -22,6 +22,8 @@ type Downly struct {
 	Admin    Admin    `yaml:"admin"`
 	Cleanup  Cleanup  `yaml:"cleanup"`
 	Cache    Cache    `yaml:"cache"`
+	// Subscriptions controls /follow.
+	Subscriptions Subscriptions `yaml:"subscriptions"`
 }
 
 type Telegram struct {
@@ -87,6 +89,15 @@ type Cache struct {
 	Disabled bool `yaml:"disabled"`
 	// RetentionDays drops entries unused for this long (default 60).
 	RetentionDays int `yaml:"retention_days"`
+}
+
+// Subscriptions controls following channels and playlists.
+type Subscriptions struct {
+	Disabled bool `yaml:"disabled"`
+	// IntervalMinutes between checks of each feed (default 60).
+	IntervalMinutes int `yaml:"interval_minutes"`
+	// MaxPerChat caps feeds per chat (default 5).
+	MaxPerChat int `yaml:"max_per_chat"`
 }
 
 type Cleanup struct {
@@ -179,6 +190,12 @@ func Load(path string) (*Root, error) {
 
 	if cfg.Downly.Cleanup.RetentionHours <= 0 {
 		cfg.Downly.Cleanup.RetentionHours = 72
+	}
+	if cfg.Downly.Subscriptions.IntervalMinutes <= 0 {
+		cfg.Downly.Subscriptions.IntervalMinutes = 60
+	}
+	if cfg.Downly.Subscriptions.MaxPerChat <= 0 {
+		cfg.Downly.Subscriptions.MaxPerChat = 5
 	}
 	if cfg.Downly.Cache.RetentionDays <= 0 {
 		cfg.Downly.Cache.RetentionDays = 60

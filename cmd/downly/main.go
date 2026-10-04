@@ -24,6 +24,7 @@ import (
 	mig "github.com/meanii/downly/internal/migrate"
 	"github.com/meanii/downly/internal/reaper"
 	"github.com/meanii/downly/internal/statsreport"
+	"github.com/meanii/downly/internal/subscriptions"
 	tgbot "github.com/meanii/downly/internal/telegram"
 	"github.com/meanii/downly/internal/tgutil"
 	"github.com/meanii/downly/internal/updater"
@@ -148,6 +149,16 @@ func main() {
 		AlbumHosts:    cfg.Downly.Services.YTDLP.AlbumHosts,
 		Logger:        logger,
 	}
+	if !cfg.Downly.Subscriptions.Disabled {
+		poller := &subscriptions.Poller{
+			Pool:     pool,
+			Fetcher:  dl,
+			Interval: time.Duration(cfg.Downly.Subscriptions.IntervalMinutes) * time.Minute,
+			Log:      logger,
+		}
+		go poller.Run(claimCtx)
+	}
+
 	host, _ := os.Hostname()
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Downly.Worker.NumberOfWorkers; i++ {

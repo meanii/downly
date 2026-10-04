@@ -960,6 +960,8 @@ func isImageURL(rawURL string) bool {
 
 // PlaylistEntry represents a single video in a playlist.
 type PlaylistEntry struct {
+	// ID is the extractor's stable ID for the entry (falls back to the URL).
+	ID    string
 	Title string
 	URL   string
 }
@@ -1009,7 +1011,11 @@ func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]P
 		if title == "" {
 			title = "(untitled)"
 		}
-		entries = append(entries, PlaylistEntry{Title: title, URL: entryURL})
+		id := e.ID
+		if id == "" {
+			id = entryURL
+		}
+		entries = append(entries, PlaylistEntry{ID: id, Title: title, URL: entryURL})
 	}
 	return entries, pl.Title, nil
 }

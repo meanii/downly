@@ -28,6 +28,9 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"settings":   h.cmdSettings,
 		"dl":         h.cmdDL,
 		"clip":       h.cmdClip,
+		"follow":     h.cmdFollow,
+		"following":  h.cmdFollowing,
+		"unfollow":   h.cmdUnfollow,
 		"gif":        h.cmdGIF,
 		"language":   h.cmdLanguage,
 		"priority": func(ctx context.Context, r *request) {

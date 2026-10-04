@@ -78,6 +78,9 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && u.CallbackQuery.Data == "noop"
 	}, h.onNoopCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "unf:")
+	}, h.onUnfollowCallback)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
 }

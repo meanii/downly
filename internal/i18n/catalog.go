@@ -30,6 +30,8 @@ var catalog = map[Lang]map[string]string{
 			"/setquality - set your default quality\n" +
 			"/playlist <url> [max] - download a playlist (up to 25)\n" +
 			"/cancel <job_id> - cancel a download\n" +
+			"/follow <link> - get new uploads from a channel automatically\n" +
+			"/following - channels you follow\n" +
 			"/settings - language and preferences\n\n" +
 			"Inline mode: type @%s <url> in any chat.",
 		"cmd_start":      "Show help",
@@ -152,6 +154,20 @@ var catalog = map[Lang]map[string]string{
 		"cmd_clip":            "Download part of a video",
 		"cmd_gif":             "Turn a video into a GIF",
 		"stage_gif":           "Converting to GIF",
+		"follow_usage":        "Usage: /follow <channel or playlist link> [audio]\nNew uploads will be sent here automatically. Add \"audio\" to get them as MP3.",
+		"follow_checking":     "Checking the channel...",
+		"follow_ok":           "✅ Following: %s\nNew uploads will be sent here (checked about every %d minutes).",
+		"follow_failed":       "Couldn't read that channel or playlist. Check the link and try again.",
+		"follow_exists":       "You already follow this.",
+		"follow_limit":        "You can follow at most %d channels here. Remove one with /following first.",
+		"following_empty":     "You don't follow anything yet. Use /follow <link>.",
+		"following_title":     "📡 Following:",
+		"unfollow_usage":      "Usage: /unfollow <number from /following>",
+		"unfollow_missing":    "That subscription doesn't exist.",
+		"unfollow_ok":         "Stopped following: %s",
+		"unfollow_toast":      "Unfollowed",
+		"cmd_follow":          "Get new uploads from a channel",
+		"cmd_following":       "Channels you follow",
 	},
 
 	RU: {
@@ -178,6 +194,8 @@ var catalog = map[Lang]map[string]string{
 			"/setquality - качество по умолчанию\n" +
 			"/playlist <url> [max] - скачать плейлист (до 25)\n" +
 			"/cancel <job_id> - отменить загрузку\n" +
+			"/follow <ссылка> - автоматически получать новые видео канала\n" +
+			"/following - ваши подписки\n" +
 			"/settings - язык и настройки\n\n" +
 			"Встроенный режим: напишите @%s <url> в любом чате.",
 		"cmd_start":      "Показать справку",
@@ -294,6 +312,20 @@ var catalog = map[Lang]map[string]string{
 		"cmd_clip":            "Скачать часть видео",
 		"cmd_gif":             "Сделать GIF из видео",
 		"stage_gif":           "Преобразование в GIF",
+		"follow_usage":        "Использование: /follow <ссылка на канал или плейлист> [audio]\nНовые видео будут присылаться сюда автоматически. Добавьте \"audio\", чтобы получать их в MP3.",
+		"follow_checking":     "Проверяю канал...",
+		"follow_ok":           "✅ Подписка оформлена: %s\nНовые видео будут присылаться сюда (проверка примерно каждые %d минут).",
+		"follow_failed":       "Не удалось прочитать этот канал или плейлист. Проверьте ссылку и попробуйте снова.",
+		"follow_exists":       "Вы уже подписаны на это.",
+		"follow_limit":        "Здесь можно подписаться не более чем на %d каналов. Сначала удалите один через /following.",
+		"following_empty":     "У вас пока нет подписок. Используйте /follow <ссылка>.",
+		"following_title":     "📡 Подписки:",
+		"unfollow_usage":      "Использование: /unfollow <номер из /following>",
+		"unfollow_missing":    "Такой подписки нет.",
+		"unfollow_ok":         "Подписка отменена: %s",
+		"unfollow_toast":      "Отписано",
+		"cmd_follow":          "Получать новые видео канала",
+		"cmd_following":       "Ваши подписки",
 	},
 
 	HI: {
@@ -320,6 +352,8 @@ var catalog = map[Lang]map[string]string{
 			"/setquality - अपनी डिफ़ॉल्ट क्वालिटी सेट करें\n" +
 			"/playlist <url> [max] - प्लेलिस्ट डाउनलोड करें (25 तक)\n" +
 			"/cancel <job_id> - डाउनलोड रद्द करें\n" +
+			"/follow <लिंक> - किसी चैनल के नए अपलोड अपने-आप पाएँ\n" +
+			"/following - आपके फ़ॉलो किए चैनल\n" +
 			"/settings - भाषा और प्राथमिकताएँ\n\n" +
 			"इनलाइन मोड: किसी भी चैट में @%s <url> लिखें।",
 		"cmd_start":      "सहायता दिखाएँ",
@@ -436,6 +470,20 @@ var catalog = map[Lang]map[string]string{
 		"cmd_clip":            "वीडियो का एक हिस्सा डाउनलोड करें",
 		"cmd_gif":             "वीडियो से GIF बनाएँ",
 		"stage_gif":           "GIF में बदला जा रहा है",
+		"follow_usage":        "उपयोग: /follow <चैनल या प्लेलिस्ट लिंक> [audio]\nनए अपलोड अपने-आप यहाँ भेजे जाएँगे। MP3 में पाने के लिए \"audio\" जोड़ें।",
+		"follow_checking":     "चैनल जाँचा जा रहा है...",
+		"follow_ok":           "✅ फ़ॉलो कर रहे हैं: %s\nनए अपलोड यहाँ भेजे जाएँगे (लगभग हर %d मिनट में जाँच)।",
+		"follow_failed":       "यह चैनल या प्लेलिस्ट पढ़ी नहीं जा सकी। लिंक जाँचें और फिर कोशिश करें।",
+		"follow_exists":       "आप इसे पहले से फ़ॉलो कर रहे हैं।",
+		"follow_limit":        "यहाँ आप अधिकतम %d चैनल फ़ॉलो कर सकते हैं। पहले /following से एक हटाएँ।",
+		"following_empty":     "आप अभी कुछ भी फ़ॉलो नहीं कर रहे। /follow <लिंक> का उपयोग करें।",
+		"following_title":     "📡 फ़ॉलो कर रहे हैं:",
+		"unfollow_usage":      "उपयोग: /unfollow </following में दी गई संख्या>",
+		"unfollow_missing":    "ऐसी कोई सदस्यता नहीं है।",
+		"unfollow_ok":         "फ़ॉलो करना बंद किया: %s",
+		"unfollow_toast":      "अनफ़ॉलो किया",
+		"cmd_follow":          "किसी चैनल के नए अपलोड पाएँ",
+		"cmd_following":       "आपके फ़ॉलो किए चैनल",
 	},
 
 	FA: {
@@ -462,6 +510,8 @@ var catalog = map[Lang]map[string]string{
 			"/setquality - تنظیم کیفیت پیش‌فرض\n" +
 			"/playlist <url> [max] - دانلود پلی‌لیست (تا ۲۵ ویدیو)\n" +
 			"/cancel <job_id> - لغو دانلود\n" +
+			"/follow <لینک> - دریافت خودکار ویدیوهای جدید یک کانال\n" +
+			"/following - کانال‌هایی که دنبال می‌کنید\n" +
 			"/settings - زبان و ترجیحات\n\n" +
 			"حالت درون‌خطی: در هر چتی ‎@%s <url>‎ را بنویسید.",
 		"cmd_start":      "نمایش راهنما",
@@ -578,5 +628,19 @@ var catalog = map[Lang]map[string]string{
 		"cmd_clip":            "دانلود بخشی از ویدیو",
 		"cmd_gif":             "تبدیل ویدیو به گیف",
 		"stage_gif":           "در حال تبدیل به گیف",
+		"follow_usage":        "روش استفاده: /follow <لینک کانال یا پلی‌لیست> [audio]\nویدیوهای جدید خودکار اینجا ارسال می‌شوند. برای دریافت به‌صورت MP3، \"audio\" را اضافه کنید.",
+		"follow_checking":     "در حال بررسی کانال...",
+		"follow_ok":           "✅ دنبال می‌کنید: %s\nویدیوهای جدید اینجا ارسال می‌شوند (بررسی تقریباً هر %d دقیقه).",
+		"follow_failed":       "خواندن این کانال یا پلی‌لیست ممکن نشد. لینک را بررسی کنید و دوباره امتحان کنید.",
+		"follow_exists":       "شما قبلاً این را دنبال می‌کنید.",
+		"follow_limit":        "اینجا حداکثر می‌توانید %d کانال را دنبال کنید. ابتدا یکی را با /following حذف کنید.",
+		"following_empty":     "هنوز چیزی را دنبال نمی‌کنید. از /follow <لینک> استفاده کنید.",
+		"following_title":     "📡 دنبال‌شده‌ها:",
+		"unfollow_usage":      "روش استفاده: /unfollow <شماره از /following>",
+		"unfollow_missing":    "چنین اشتراکی وجود ندارد.",
+		"unfollow_ok":         "دنبال کردن متوقف شد: %s",
+		"unfollow_toast":      "لغو دنبال کردن",
+		"cmd_follow":          "دریافت ویدیوهای جدید یک کانال",
+		"cmd_following":       "کانال‌هایی که دنبال می‌کنید",
 	},
 }
