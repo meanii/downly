@@ -23,6 +23,8 @@ func kindOf(m downloader.MediaType) media.Kind {
 		return media.Audio
 	case downloader.MediaPhoto:
 		return media.Photo
+	case downloader.MediaAnimation:
+		return media.Animation
 	}
 	return media.Document
 }

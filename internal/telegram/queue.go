@@ -7,6 +7,7 @@ import (
 	"github.com/go-telegram/bot"
 
 	"github.com/meanii/downly/internal/db"
+	"github.com/meanii/downly/internal/downloader"
 	"github.com/meanii/downly/internal/i18n"
 	"github.com/meanii/downly/internal/media"
 	"github.com/meanii/downly/internal/safeurl"
@@ -23,6 +24,10 @@ type download struct {
 	inlineMessageID string
 	// replyTo is the message to answer (0 = none).
 	replyTo int
+	// clip limits the download to a section of the video.
+	clip *downloader.Range
+	// gif converts the video (section) into a Telegram GIF.
+	gif bool
 }
 
 func (d download) sendOptions(caption string) worker.SendOptions {
@@ -40,11 +45,17 @@ func (h *handler) enqueue(ctx context.Context, d download) (int64, error) {
 		return 0, safeurl.ErrInvalidURL
 	}
 	cleanURL, mode, quality := jobSpec(d.url)
+	if d.gif {
+		mode, quality = db.ModeGIF, ""
+	}
 	job := db.NewJob{
 		ChatID: d.chatID, UserID: d.userID, URL: cleanURL, Mode: mode, Quality: quality,
-		CacheKey:        media.CacheKey(cleanURL, string(mode), quality, ""),
+		CacheKey:        media.CacheKey(cleanURL, string(mode), quality, clipVariant(d.clip, d.gif)),
 		InlineMessageID: d.inlineMessageID,
 		ReplyTo:         int64(d.replyTo),
+	}
+	if d.clip != nil {
+		job.ClipStart, job.ClipEnd = d.clip.Start, d.clip.End
 	}
 
 	if id, ok := h.serveFromCache(ctx, d, job); ok {

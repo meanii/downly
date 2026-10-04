@@ -49,6 +49,8 @@ type Downloader interface {
 	Download(ctx context.Context, workDir string, jobID int64, url string, onProgress func(string, int)) (*downloader.Result, error)
 	DownloadWithQuality(ctx context.Context, workDir string, jobID int64, url, quality string, onProgress func(string, int)) (*downloader.Result, error)
 	DownloadAudio(ctx context.Context, workDir string, jobID int64, url string, onProgress func(string, int)) (*downloader.Result, error)
+	DownloadClip(ctx context.Context, workDir string, jobID int64, url, quality string, r downloader.Range, onProgress func(string, int)) (*downloader.Result, error)
+	DownloadGIF(ctx context.Context, workDir string, jobID int64, url string, r *downloader.Range, onProgress func(string, int)) (*downloader.Result, error)
 }
 
 // TelegramMessenger implements Messenger with the Bot API.
@@ -303,6 +305,14 @@ func sendMedia(ctx context.Context, b *bot.Bot, chatID int64, f *os.File, res *d
 			ChatID:          chatID,
 			Photo:           upload,
 			Caption:         caption,
+			ReplyParameters: rp,
+		})
+	case downloader.MediaAnimation:
+		msg, err = b.SendAnimation(ctx, &bot.SendAnimationParams{
+			ChatID:          chatID,
+			Animation:       upload,
+			Caption:         caption,
+			Duration:        res.Duration,
 			ReplyParameters: rp,
 		})
 	default:

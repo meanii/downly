@@ -219,7 +219,7 @@ func (h *handler) onMyChatMember(ctx context.Context, _ *bot.Bot, update *models
 
 // --- Command menus ---
 
-var menuCommands = []string{"start", "dl", "queue", "history", "mp3", "quality", "setquality", "playlist", "cancel", "settings"}
+var menuCommands = []string{"start", "dl", "queue", "history", "mp3", "clip", "gif", "quality", "setquality", "playlist", "cancel", "settings"}
 
 func groupModeLabel(lang i18n.Lang, mode string) string {
 	if mode == db.GroupModeCommand {

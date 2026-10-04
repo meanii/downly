@@ -61,6 +61,12 @@ func (f *fakeDL) DownloadWithQuality(ctx context.Context, workDir string, jobID 
 func (f *fakeDL) DownloadAudio(ctx context.Context, workDir string, jobID int64, url string, _ func(string, int)) (*downloader.Result, error) {
 	return f.run(ctx, workDir, jobID)
 }
+func (f *fakeDL) DownloadClip(ctx context.Context, workDir string, jobID int64, url, q string, r downloader.Range, _ func(string, int)) (*downloader.Result, error) {
+	return f.run(ctx, workDir, jobID)
+}
+func (f *fakeDL) DownloadGIF(ctx context.Context, workDir string, jobID int64, url string, r *downloader.Range, _ func(string, int)) (*downloader.Result, error) {
+	return f.run(ctx, workDir, jobID)
+}
 
 // blockUntilCanceled simulates a long download.
 func blockUntilCanceled(ctx context.Context, _ int) error {

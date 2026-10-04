@@ -101,8 +101,8 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 
-	urls := extractURLs(text)
-	if len(urls) == 0 {
+	reqs := extractRequests(text)
+	if len(reqs) == 0 {
 		return
 	}
 	if isGroup(msg.Chat) {
@@ -114,13 +114,13 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 			return // this group only downloads via /dl
 		}
 	}
-	h.downloadAll(ctx, msg, urls, msg.ID)
+	h.downloadAll(ctx, msg, reqs, msg.ID, false)
 }
 
-// downloadAll queues every URL from msg. In groups the bot answers
-// replyTo (the message holding the links); in private chats it doesn't
-// thread replies.
-func (h *handler) downloadAll(ctx context.Context, msg *models.Message, urls []string, replyTo int) {
+// downloadAll queues every request from msg (as GIFs when gif is set). In
+// groups the bot answers replyTo (the message holding the links); in
+// private chats it doesn't thread replies.
+func (h *handler) downloadAll(ctx context.Context, msg *models.Message, reqs []urlRequest, replyTo int, gif bool) {
 	chatID, userID := msg.Chat.ID, msg.From.ID
 	lang := h.langFor(ctx, chatID, msg.From)
 	if !isGroup(msg.Chat) {
@@ -130,12 +130,18 @@ func (h *handler) downloadAll(ctx context.Context, msg *models.Message, urls []s
 		return
 	}
 	quality := h.preferredQuality(ctx, userID)
-	for _, url := range urls {
+	for _, req := range reqs {
+		if text, ok := checkClip(lang, req.clip, gif); !ok {
+			h.replyTo(ctx, chatID, replyTo, text)
+			return
+		}
+		url := req.url
 		// Apply the user's quality preference if no explicit prefix
-		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
+		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" && !gif {
 			url = quality + ":" + url
 		}
-		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: url, replyTo: replyTo}); err != nil {
+		d := download{chatID: chatID, userID: userID, lang: lang, url: url, replyTo: replyTo, clip: req.clip, gif: gif}
+		if _, err := h.enqueue(ctx, d); err != nil {
 			// Limit and validation errors were already reported; stop on the
 			// first so a long list does not produce a wall of errors.
 			return

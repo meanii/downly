@@ -214,7 +214,17 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 
 func (w *Worker) download(ctx context.Context, log *slog.Logger, job *db.Job, lang i18n.Lang, progress *progressReporter) (*downloader.Result, error) {
 	workDir := w.Cfg.Downly.Worker.WorkDir
+	clip := downloader.Range{Start: job.ClipStart, End: job.ClipEnd}
+	hasClip := job.ClipEnd > job.ClipStart
 	switch {
+	case job.Mode == db.ModeGIF:
+		var r *downloader.Range
+		if hasClip {
+			r = &clip
+		}
+		return w.DL.DownloadGIF(ctx, workDir, job.ID, job.URL, r, progress.Update)
+	case hasClip:
+		return w.DL.DownloadClip(ctx, workDir, job.ID, job.URL, job.Quality, clip, progress.Update)
 	case job.Mode == db.ModeAudio:
 		return w.DL.DownloadAudio(ctx, workDir, job.ID, job.URL, progress.Update)
 	case job.Quality != "":

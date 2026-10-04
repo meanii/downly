@@ -24,6 +24,8 @@ var catalog = map[Lang]map[string]string{
 			"/history - past downloads\n" +
 			"/dl <url> - download a link (in groups, reply /dl to a message)\n" +
 			"/mp3 <url> - audio only\n" +
+			"/clip <url> 1:20-2:05 - download only part of a video\n" +
+			"/gif <url> [0:05-0:12] - turn a video into a GIF\n" +
 			"/quality <url> - choose the quality for one download\n" +
 			"/setquality - set your default quality\n" +
 			"/playlist <url> [max] - download a playlist (up to 25)\n" +
@@ -142,6 +144,14 @@ var catalog = map[Lang]map[string]string{
 		"btn_group_links":     "🔗 Links: %s",
 		"group_links_auto":    "download every link",
 		"group_links_command": "only with /dl",
+		"clip_usage":          "Usage: /clip <url> <start-end>, e.g. /clip https://youtu.be/... 1:20-2:05\nYou can also just send the link followed by the time range.",
+		"gif_usage":           "Usage: /gif <url> [start-end]\nWithout a range the first %d seconds are used; at most %d seconds.",
+		"clip_invalid":        "Invalid time range. Use start-end, e.g. 1:20-2:05 or 80-125.",
+		"clip_too_long":       "Clips can be at most %d minutes long.",
+		"gif_too_long":        "GIFs can be at most %d seconds long.",
+		"cmd_clip":            "Download part of a video",
+		"cmd_gif":             "Turn a video into a GIF",
+		"stage_gif":           "Converting to GIF",
 	},
 
 	RU: {
@@ -162,6 +172,8 @@ var catalog = map[Lang]map[string]string{
 			"/history - прошлые загрузки\n" +
 			"/dl <url> - скачать по ссылке (в группах ответьте /dl на сообщение)\n" +
 			"/mp3 <url> - только аудио\n" +
+			"/clip <url> 1:20-2:05 - скачать только часть видео\n" +
+			"/gif <url> [0:05-0:12] - сделать GIF из видео\n" +
 			"/quality <url> - выбрать качество для одной загрузки\n" +
 			"/setquality - качество по умолчанию\n" +
 			"/playlist <url> [max] - скачать плейлист (до 25)\n" +
@@ -274,6 +286,14 @@ var catalog = map[Lang]map[string]string{
 		"btn_group_links":     "🔗 Ссылки: %s",
 		"group_links_auto":    "скачивать все ссылки",
 		"group_links_command": "только через /dl",
+		"clip_usage":          "Использование: /clip <url> <начало-конец>, например /clip https://youtu.be/... 1:20-2:05\nМожно также отправить ссылку, а за ней — отрезок времени.",
+		"gif_usage":           "Использование: /gif <url> [начало-конец]\nБез отрезка берутся первые %d секунд; максимум %d секунд.",
+		"clip_invalid":        "Неверный отрезок времени. Используйте начало-конец, например 1:20-2:05 или 80-125.",
+		"clip_too_long":       "Отрезок может быть не длиннее %d минут.",
+		"gif_too_long":        "GIF может быть не длиннее %d секунд.",
+		"cmd_clip":            "Скачать часть видео",
+		"cmd_gif":             "Сделать GIF из видео",
+		"stage_gif":           "Преобразование в GIF",
 	},
 
 	HI: {
@@ -294,6 +314,8 @@ var catalog = map[Lang]map[string]string{
 			"/history - पिछले डाउनलोड\n" +
 			"/dl <url> - लिंक डाउनलोड करें (ग्रुप में किसी संदेश का जवाब /dl से दें)\n" +
 			"/mp3 <url> - केवल ऑडियो\n" +
+			"/clip <url> 1:20-2:05 - वीडियो का केवल एक हिस्सा डाउनलोड करें\n" +
+			"/gif <url> [0:05-0:12] - वीडियो से GIF बनाएँ\n" +
 			"/quality <url> - एक डाउनलोड के लिए क्वालिटी चुनें\n" +
 			"/setquality - अपनी डिफ़ॉल्ट क्वालिटी सेट करें\n" +
 			"/playlist <url> [max] - प्लेलिस्ट डाउनलोड करें (25 तक)\n" +
@@ -406,6 +428,14 @@ var catalog = map[Lang]map[string]string{
 		"btn_group_links":     "🔗 लिंक: %s",
 		"group_links_auto":    "हर लिंक डाउनलोड करें",
 		"group_links_command": "केवल /dl से",
+		"clip_usage":          "उपयोग: /clip <url> <शुरू-अंत>, जैसे /clip https://youtu.be/... 1:20-2:05\nआप लिंक के बाद समय-सीमा लिखकर भी भेज सकते हैं।",
+		"gif_usage":           "उपयोग: /gif <url> [शुरू-अंत]\nसमय-सीमा के बिना पहले %d सेकंड लिए जाते हैं; अधिकतम %d सेकंड।",
+		"clip_invalid":        "अमान्य समय-सीमा। शुरू-अंत लिखें, जैसे 1:20-2:05 या 80-125।",
+		"clip_too_long":       "क्लिप अधिकतम %d मिनट की हो सकती है।",
+		"gif_too_long":        "GIF अधिकतम %d सेकंड का हो सकता है।",
+		"cmd_clip":            "वीडियो का एक हिस्सा डाउनलोड करें",
+		"cmd_gif":             "वीडियो से GIF बनाएँ",
+		"stage_gif":           "GIF में बदला जा रहा है",
 	},
 
 	FA: {
@@ -426,6 +456,8 @@ var catalog = map[Lang]map[string]string{
 			"/history - دانلودهای قبلی\n" +
 			"/dl <url> - دانلود یک لینک (در گروه‌ها با /dl به پیام پاسخ دهید)\n" +
 			"/mp3 <url> - فقط صدا\n" +
+			"/clip <url> 1:20-2:05 - دانلود فقط بخشی از ویدیو\n" +
+			"/gif <url> [0:05-0:12] - تبدیل ویدیو به گیف\n" +
 			"/quality <url> - انتخاب کیفیت برای یک دانلود\n" +
 			"/setquality - تنظیم کیفیت پیش‌فرض\n" +
 			"/playlist <url> [max] - دانلود پلی‌لیست (تا ۲۵ ویدیو)\n" +
@@ -538,5 +570,13 @@ var catalog = map[Lang]map[string]string{
 		"btn_group_links":     "🔗 لینک‌ها: %s",
 		"group_links_auto":    "دانلود همه لینک‌ها",
 		"group_links_command": "فقط با /dl",
+		"clip_usage":          "روش استفاده: /clip <url> <شروع-پایان>، مثلاً /clip https://youtu.be/... 1:20-2:05\nمی‌توانید لینک را هم همراه با بازه زمانی بعد از آن بفرستید.",
+		"gif_usage":           "روش استفاده: /gif <url> [شروع-پایان]\nبدون بازه، %d ثانیه اول استفاده می‌شود؛ حداکثر %d ثانیه.",
+		"clip_invalid":        "بازه زمانی نامعتبر است. از شروع-پایان استفاده کنید، مثلاً 1:20-2:05 یا 80-125.",
+		"clip_too_long":       "کلیپ حداکثر می‌تواند %d دقیقه باشد.",
+		"gif_too_long":        "گیف حداکثر می‌تواند %d ثانیه باشد.",
+		"cmd_clip":            "دانلود بخشی از ویدیو",
+		"cmd_gif":             "تبدیل ویدیو به گیف",
+		"stage_gif":           "در حال تبدیل به گیف",
 	},
 }

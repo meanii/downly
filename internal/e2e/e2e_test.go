@@ -72,6 +72,18 @@ printf 'FAKE-MEDIA-%s' "$ext" > "$file"
 echo "[download] 100% of 1.00MiB"
 `
 
+// fakeFFmpeg stands in for the GIF conversion: it copies the -i input to
+// the output path (the last argument).
+const fakeFFmpeg = `#!/usr/bin/env bash
+in=""; prev=""; last=""
+for a in "$@"; do
+  [ "$prev" = "-i" ] && in="$a"
+  prev="$a"; last="$a"
+done
+echo "$*" >> "$(dirname "$0")/ffmpeg.log"
+cp "$in" "$last"
+`
+
 // A literal public IP keeps URL validation offline (no DNS lookup); the fake
 // yt-dlp never connects anywhere.
 const videoURL = "https://1.1.1.1/watch?v=vid42"
@@ -95,6 +107,10 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 
 	bin := filepath.Join(t.TempDir(), "yt-dlp")
 	if err := os.WriteFile(bin, []byte(fakeYTDLP), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ffmpeg := filepath.Join(filepath.Dir(bin), "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte(fakeFFmpeg), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	workDir := t.TempDir()
@@ -133,6 +149,7 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 			MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
 			// The literal-IP test host stands in for an album site.
 			AlbumHosts: []string{"1.1.1.1"},
+			FFmpegBin:  ffmpeg,
 			Logger:     logger,
 		},
 		Msg:        worker.TelegramMessenger{Bot: b},
@@ -145,6 +162,18 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 	t.Cleanup(func() { cancel(); <-done })
 
 	return &env{t: t, api: api, b: b, pool: pool, workDir: workDir, binDir: filepath.Dir(bin)}
+}
+
+// ytdlpCalls returns the argument lists of yt-dlp download calls.
+func (e *env) ytdlpCalls() []string {
+	data, _ := os.ReadFile(filepath.Join(e.binDir, "calls.log"))
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" && !strings.Contains(line, "--dump-single-json") {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // downloads counts how many times yt-dlp actually downloaded media
@@ -279,9 +308,17 @@ func TestE2EVideoInRussian(t *testing.T) {
 		t.Fatal("queue ack not in Russian")
 	}
 
-	entries, _ := os.ReadDir(e.workDir)
-	if len(entries) != 0 {
-		t.Fatalf("work dir not cleaned up: %v", entries)
+	// The job is marked done just before the worker removes its directory.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, _ := os.ReadDir(e.workDir)
+		if len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("work dir not cleaned up: %v", entries)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

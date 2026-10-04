@@ -27,6 +27,8 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"playlist":   h.cmdPlaylist,
 		"settings":   h.cmdSettings,
 		"dl":         h.cmdDL,
+		"clip":       h.cmdClip,
+		"gif":        h.cmdGIF,
 		"language":   h.cmdLanguage,
 		"priority": func(ctx context.Context, r *request) {
 			h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "priority_info"))
@@ -153,18 +155,18 @@ func (h *handler) cmdCancel(ctx context.Context, r *request) {
 // cmdDL downloads the links in its arguments or, when used as a reply, in
 // the replied-to message. It is how groups in "command" mode download.
 func (h *handler) cmdDL(ctx context.Context, r *request) {
-	urls := extractURLs(r.args)
+	reqs := extractRequests(r.args)
 	replyTo := r.msg.ID
-	if len(urls) == 0 && r.msg.ReplyToMessage != nil {
+	if len(reqs) == 0 && r.msg.ReplyToMessage != nil {
 		orig := r.msg.ReplyToMessage
-		urls = extractURLs(orig.Text + " " + orig.Caption)
+		reqs = extractRequests(orig.Text + " " + orig.Caption)
 		replyTo = orig.ID
 	}
-	if len(urls) == 0 {
+	if len(reqs) == 0 {
 		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "dl_usage"))
 		return
 	}
-	h.downloadAll(ctx, r.msg, urls, replyTo)
+	h.downloadAll(ctx, r.msg, reqs, replyTo, false)
 }
 
 func (h *handler) cmdMP3(ctx context.Context, r *request) {

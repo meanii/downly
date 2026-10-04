@@ -146,6 +146,8 @@ const (
 	MediaVideo
 	MediaAudio
 	MediaPhoto
+	// MediaAnimation is a silent looping MP4 sent as a Telegram GIF.
+	MediaAnimation
 )
 
 // Item is one downloaded file.
@@ -422,6 +424,11 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 		"-x",
 		"--audio-format", "mp3",
 		"--audio-quality", "0",
+		// Title/artist tags and the cover image inside the MP3, which
+		// Telegram shows in its player.
+		"--embed-metadata",
+		"--embed-thumbnail",
+		"--convert-thumbnails", "jpg",
 		"-o", outputTemplate,
 	}
 	cmd := y.command(ctx, args, url)

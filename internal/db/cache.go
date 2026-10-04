@@ -89,10 +89,12 @@ func InsertCachedJob(ctx context.Context, pool *pgxpool.Pool, j NewJob, e *Cache
 	var id int64
 	err := pool.QueryRow(ctx, `
 		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
-			progress_text, progress_percent, cache_key, cached, platform, output_name, file_size_bytes, started_at, finished_at)
-		values ($1, $2, $3, $4, $5, $6, 0, $7, 'Completed', 100, $8, true, $9, $10, $11, now(), now())
+			progress_text, progress_percent, cache_key, cached, platform, output_name, file_size_bytes, started_at, finished_at,
+			reply_to_message_id, clip_start, clip_end)
+		values ($1, $2, $3, $4, $5, $6, 0, $7, 'Completed', 100, $8, true, $9, $10, $11, now(), now(), $12, $13, $14)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusDone, j.TelegramMsgID, e.Key, e.Platform, e.Title, e.SizeBytes).Scan(&id)
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusDone, j.TelegramMsgID, e.Key, e.Platform, e.Title, e.SizeBytes,
+		j.ReplyTo, j.ClipStart, j.ClipEnd).Scan(&id)
 	return id, err
 }
 
