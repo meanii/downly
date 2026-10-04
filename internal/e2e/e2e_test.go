@@ -32,7 +32,7 @@ import (
 const fakeYTDLP = `#!/usr/bin/env bash
 set -u
 echo "$*" >> "$(dirname "$0")/calls.log"
-out=""; audio=0; url=""; after_dd=0; dump=0
+out=""; audio=0; url=""; after_dd=0; dump=0; yes_playlist=0
 while [ $# -gt 0 ]; do
   if [ $after_dd = 1 ]; then url="$1"; shift; continue; fi
   case "$1" in
@@ -40,6 +40,7 @@ while [ $# -gt 0 ]; do
     -o) out="$2"; shift ;;
     -x) audio=1 ;;
     --dump-single-json) dump=1 ;;
+    --yes-playlist) yes_playlist=1 ;;
   esac
   shift
 done
@@ -51,6 +52,17 @@ if [ $dump = 1 ]; then
   printf '%s\n' '{"extractor_key":"Youtube","title":"E2E Видео","id":"vid42","duration":65}'
   exit 0
 fi
+# A carousel post: three items, but only the first without --yes-playlist.
+case "$url" in
+  *carousel*)
+    n=1; [ $yes_playlist = 1 ] && n=3
+    for i in $(seq 1 $n); do
+      ext=jpg; [ $i = 2 ] && ext=mp4
+      f="${out//"%(id)s"/c$i}"; f="${f//"%(ext)s"/$ext}"
+      printf 'ITEM-%s' "$i" > "$f"; sleep 0.05
+    done
+    exit 0 ;;
+esac
 ext=mp4; [ $audio = 1 ] && ext=mp3
 file="${out//"%(id)s"/vid42}"; file="${file//"%(ext)s"/$ext}"
 echo "[download] Destination: $file"
@@ -118,7 +130,9 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 		DL: downloader.YTDLP{
 			Bin:           bin,
 			MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
-			Logger:        logger,
+			// The literal-IP test host stands in for an album site.
+			AlbumHosts: []string{"1.1.1.1"},
+			Logger:     logger,
 		},
 		Msg:        worker.TelegramMessenger{Bot: b},
 		Controller: controller,

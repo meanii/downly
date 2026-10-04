@@ -87,6 +87,9 @@ func replyParams(opts SendOptions) *models.ReplyParameters {
 }
 
 func (m TelegramMessenger) SendResult(ctx context.Context, chatID int64, res *downloader.Result, opts SendOptions) ([]media.Item, error) {
+	if len(res.More) > 0 {
+		return sendAlbum(ctx, m.Bot, chatID, res, opts)
+	}
 	f, err := os.Open(res.FilePath)
 	if err != nil {
 		return nil, err
@@ -109,17 +112,30 @@ func (m TelegramMessenger) SendCached(ctx context.Context, chatID int64, items [
 	if len(items) == 1 {
 		return sendCachedOne(ctx, m.Bot, chatID, items[0], meta, opts)
 	}
-	for start := 0; start < len(items); start += maxAlbumItems {
-		group := items[start:min(start+maxAlbumItems, len(items))]
-		var inputs []models.InputMedia
-		for i, it := range group {
-			caption := ""
-			if start == 0 && i == 0 {
-				caption = opts.Caption
-			}
-			inputs = append(inputs, inputMediaFor(it.Kind, it.FileID, nil, caption))
+	kinds := make([]media.Kind, len(items))
+	for i, it := range items {
+		kinds[i] = it.Kind
+	}
+	for gi, group := range albumGroups(kinds) {
+		o := opts
+		if gi > 0 {
+			o.Caption = ""
 		}
-		if _, err := m.Bot.SendMediaGroup(ctx, &bot.SendMediaGroupParams{ChatID: chatID, Media: inputs, ReplyParameters: replyParams(opts)}); err != nil {
+		if len(group) == 1 {
+			if err := sendCachedOne(ctx, m.Bot, chatID, items[group[0]], meta, o); err != nil {
+				return err
+			}
+			continue
+		}
+		var inputs []models.InputMedia
+		for n, i := range group {
+			caption := ""
+			if n == 0 {
+				caption = o.Caption
+			}
+			inputs = append(inputs, inputMediaFor(items[i].Kind, items[i].FileID, nil, caption))
+		}
+		if _, err := m.Bot.SendMediaGroup(ctx, &bot.SendMediaGroupParams{ChatID: chatID, Media: inputs, ReplyParameters: replyParams(o)}); err != nil {
 			return err
 		}
 	}

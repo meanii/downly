@@ -163,22 +163,21 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 		return
 	}
 
-	fi, err := os.Stat(res.FilePath)
+	size, tooBig, err := w.checkSizes(log, res)
 	if err != nil {
 		w.fail(workCtx, log, job, lang, err, false)
 		return
 	}
-	log.Info("download completed", "platform", res.Platform, "file_name", res.FileName, "size_bytes", fi.Size(), "media_type", res.Media)
-
-	if limit := w.Cfg.Downly.Worker.MaxFileSizeMB; fi.Size() > limit*1024*1024 {
-		msg := i18n.T(lang, "too_large", float64(fi.Size())/1024/1024, limit)
+	log.Info("download completed", "platform", res.Platform, "file_name", res.FileName, "size_bytes", size, "media_type", res.Media, "items", 1+len(res.More))
+	if tooBig > 0 {
+		msg := i18n.T(lang, "too_large", float64(tooBig)/1024/1024, w.Cfg.Downly.Worker.MaxFileSizeMB)
 		w.fail(workCtx, log, job, lang, errors.New(msg), true)
 		return
 	}
 
 	progress.Force("Uploading to Telegram", 99)
-	meta := MetaFromResult(res, fi.Size())
-	items, err := uploadWithRetry(runCtx, w.Msg, job.ChatID, res, SendOptions{Caption: Caption(lang, meta)}, fi.Size())
+	meta := MetaFromResult(res, size)
+	items, err := uploadWithRetry(runCtx, w.Msg, job.ChatID, res, SendOptions{Caption: Caption(lang, meta)}, size)
 	if runCtx.Err() != nil && w.handleInterrupted(workCtx, runCtx, log, job, lang) {
 		return
 	}
@@ -197,7 +196,7 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 
 	fctx, cancel := w.finalizeCtx(workCtx)
 	defer cancel()
-	if err := db.MarkDone(fctx, w.Pool, job.ID, res.FilePath, res.FileName, res.Platform, fi.Size()); err != nil {
+	if err := db.MarkDone(fctx, w.Pool, job.ID, res.FilePath, res.FileName, res.Platform, size); err != nil {
 		log.Error("mark done failed", "error", err)
 	}
 	w.remember(fctx, log, job, items, meta)
@@ -335,6 +334,33 @@ func (w *Worker) finalizeCtx(workCtx context.Context) (context.Context, context.
 // editFinal shows a final status, waiting out a 429 rather than dropping it.
 func (w *Worker) editFinal(ctx context.Context, job *db.Job, text string) {
 	_ = tgutil.Call(ctx, 3, func() error { return w.Msg.Edit(ctx, job.ChatID, int(job.TelegramMsgID), text) })
+}
+
+// checkSizes totals the result's files against the upload limit. Album
+// extras that are too large are dropped; if the primary file is, tooBig is
+// its size and the job should fail.
+func (w *Worker) checkSizes(log *slog.Logger, res *downloader.Result) (total, tooBig int64, err error) {
+	limit := w.Cfg.Downly.Worker.MaxFileSizeMB * 1024 * 1024
+	fi, err := os.Stat(res.FilePath)
+	if err != nil {
+		return 0, 0, err
+	}
+	if fi.Size() > limit {
+		return fi.Size(), fi.Size(), nil
+	}
+	total = fi.Size()
+	kept := res.More[:0]
+	for _, it := range res.More {
+		st, err := os.Stat(it.FilePath)
+		if err != nil || st.Size() > limit {
+			log.Warn("dropping album item", "file", it.FileName, "error", err)
+			continue
+		}
+		total += st.Size()
+		kept = append(kept, it)
+	}
+	res.More = kept
+	return total, 0, nil
 }
 
 // remember stores the uploaded file IDs so the same request is served

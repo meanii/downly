@@ -145,6 +145,7 @@ func main() {
 		CookiesFile:   cfg.Downly.Services.YTDLP.CookiesFile,
 		MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
 		MaxDownloadMB: cfg.Downly.Worker.MaxDownloadMB,
+		AlbumHosts:    cfg.Downly.Services.YTDLP.AlbumHosts,
 		Logger:        logger,
 	}
 	host, _ := os.Hostname()

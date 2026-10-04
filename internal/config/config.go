@@ -63,6 +63,9 @@ type YTDLP struct {
 	Bin             string `yaml:"bin"`
 	CookiesFile     string `yaml:"cookies_file"`
 	AutoUpdateHours int    `yaml:"auto_update_hours"`
+	// AlbumHosts overrides the sites whose multi-photo/video posts are sent
+	// as albums (default: downloader.DefaultAlbumHosts).
+	AlbumHosts []string `yaml:"album_hosts"`
 }
 
 type Limits struct {

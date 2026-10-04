@@ -10,10 +10,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +36,50 @@ type YTDLP struct {
 	// HTTPClient is used for direct image/thumbnail fetches. It must refuse
 	// private addresses; defaults to safeurl.NewClient.
 	HTTPClient *http.Client
+	// AlbumHosts lists sites whose posts may hold several photos/videos
+	// (carousels, galleries); all items are fetched and sent as an album.
+	// Defaults to DefaultAlbumHosts.
+	AlbumHosts []string
+}
+
+// DefaultAlbumHosts are sites where one link can be a multi-media post.
+// YouTube is deliberately absent: there a "playlist" is many separate videos.
+var DefaultAlbumHosts = []string{
+	"instagram.com", "x.com", "twitter.com", "threads.net", "threads.com",
+	"tiktok.com", "reddit.com", "facebook.com", "bsky.app",
+}
+
+// MaxAlbumItems caps how many files one album link may produce (Telegram's
+// limit for a single media group).
+const MaxAlbumItems = 10
+
+// isAlbumURL reports whether rawURL's host (or a parent domain) is an album host.
+func (y YTDLP) isAlbumURL(rawURL string) bool {
+	hosts := y.AlbumHosts
+	if hosts == nil {
+		hosts = DefaultAlbumHosts
+	}
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, h := range hosts {
+		h = strings.ToLower(h)
+		if host == h || strings.HasSuffix(host, "."+h) {
+			return true
+		}
+	}
+	return false
+}
+
+// playlistArgs fetches every item of multi-media posts on album hosts and
+// only the linked video elsewhere.
+func (y YTDLP) playlistArgs(rawURL string) []string {
+	if y.isAlbumURL(rawURL) {
+		return []string{"--yes-playlist", "--playlist-items", "1:" + strconv.Itoa(MaxAlbumItems)}
+	}
+	return []string{"--no-playlist"}
 }
 
 const maxThumbnailBytes = 10 * 1024 * 1024
@@ -102,11 +148,20 @@ const (
 	MediaPhoto
 )
 
+// Item is one downloaded file.
+type Item struct {
+	FilePath string
+	FileName string
+	Media    MediaType
+}
+
 type Result struct {
-	FilePath      string
-	FileName      string
-	Platform      string
-	Media         MediaType
+	FilePath string
+	FileName string
+	Platform string
+	Media    MediaType
+	// More holds the remaining files of a multi-media post, in order.
+	More          []Item
 	Title         string
 	Performer     string
 	Duration      int
@@ -126,6 +181,11 @@ type mediaInfo struct {
 	Filesize       int64   `json:"filesize"`
 	FilesizeApprox int64   `json:"filesize_approx"`
 	Platform       string  `json:"-"`
+}
+
+// Items returns every file of the result, the primary one first.
+func (r *Result) Items() []Item {
+	return append([]Item{{FilePath: r.FilePath, FileName: r.FileName, Media: r.Media}}, r.More...)
 }
 
 // performer is who to credit for audio: the artist if known, else the uploader.
@@ -272,11 +332,11 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	args := []string{
 		"--ignore-config",
 		"--newline",
-		"--no-playlist",
 		"-f", qualityFormat(quality),
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
+	args = append(args, y.playlistArgs(url)...)
 	args = append(args, y.sizeArgs()...)
 	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
@@ -313,7 +373,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 		onProgress("Finalizing file", 98)
 	}
 
-	result, findErr := findOutputFile(jobDir, meta.Platform)
+	result, findErr := findOutputFiles(jobDir, meta.Platform, y.isAlbumURL(url))
 	if findErr != nil {
 		return nil, findErr
 	}
@@ -323,6 +383,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 
 	// Compress for Telegram if needed
 	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
+	y.compressMore(ctx, log, result)
 
 	result.Title = meta.Title
 	result.Performer = meta.performer()
@@ -484,11 +545,11 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	args := []string{
 		"--ignore-config",
 		"--newline",
-		"--no-playlist",
 		"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
+	args = append(args, y.playlistArgs(url)...)
 	args = append(args, y.sizeArgs()...)
 	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
@@ -527,7 +588,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	}
 	log.Info("yt-dlp finished")
 
-	result, findErr := findOutputFile(jobDir, meta.Platform)
+	result, findErr := findOutputFiles(jobDir, meta.Platform, y.isAlbumURL(url))
 	if findErr != nil {
 		return nil, findErr
 	}
@@ -537,6 +598,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 
 	// Compress for Telegram if needed
 	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
+	y.compressMore(ctx, log, result)
 
 	result.Title = meta.Title
 	result.Performer = meta.performer()
@@ -555,9 +617,9 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 	args := []string{
 		"--ignore-config",
 		"--newline",
-		"--no-playlist",
 		"-o", outputTemplate,
 	}
+	args = append(args, y.playlistArgs(url)...)
 	args = append(args, y.sizeArgs()...)
 	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
@@ -593,7 +655,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 		onProgress("Finalizing", 98)
 	}
 
-	result, findErr := findOutputFile(jobDir, meta.Platform)
+	result, findErr := findOutputFiles(jobDir, meta.Platform, y.isAlbumURL(url))
 	if findErr != nil {
 		return nil, findErr
 	}
@@ -604,6 +666,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 		// Compress for Telegram if needed
 		result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 	}
+	y.compressMore(ctx, log, result)
 
 	result.Title = meta.Title
 	result.Performer = meta.performer()
@@ -757,22 +820,37 @@ var skipExts = map[string]bool{
 }
 
 func findOutputFile(jobDir, platform string) (*Result, error) {
-	var found string
+	return findOutputFiles(jobDir, platform, false)
+}
+
+// findOutputFiles returns the downloaded media in jobDir. With album set,
+// every file (in download order, at most MaxAlbumItems) is returned;
+// otherwise only the first, so stray files never turn a video into an album.
+func findOutputFiles(jobDir, platform string, album bool) (*Result, error) {
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	var found []candidate
 	err := filepath.WalkDir(jobDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || found != "" {
+		if err != nil || d.IsDir() {
 			return nil
 		}
 		name := d.Name()
-		if skipExts[strings.ToLower(filepath.Ext(name))] {
+		if skipExts[strings.ToLower(filepath.Ext(name))] || strings.HasPrefix(name, "thumbnail.") {
 			return nil
 		}
-		found = path
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		found = append(found, candidate{path, info.ModTime()})
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if found == "" {
+	if len(found) == 0 {
 		// Log directory contents to help diagnose why yt-dlp wrote nothing.
 		if entries, readErr := os.ReadDir(jobDir); readErr == nil {
 			names := make([]string, 0, len(entries))
@@ -785,13 +863,40 @@ func findOutputFile(jobDir, platform string) (*Result, error) {
 		}
 		return nil, fmt.Errorf("no output file found in %s", jobDir)
 	}
-	name := filepath.Base(found)
-	return &Result{
-		FilePath: found,
+	// yt-dlp writes album items in order; break ties by name.
+	sort.Slice(found, func(a, b int) bool {
+		if !found[a].mod.Equal(found[b].mod) {
+			return found[a].mod.Before(found[b].mod)
+		}
+		return found[a].path < found[b].path
+	})
+	if !album {
+		found = found[:1]
+	} else if len(found) > MaxAlbumItems {
+		found = found[:MaxAlbumItems]
+	}
+	name := filepath.Base(found[0].path)
+	res := &Result{
+		FilePath: found[0].path,
 		FileName: name,
 		Platform: platform,
 		Media:    detectMediaType(name),
-	}, nil
+	}
+	for _, c := range found[1:] {
+		n := filepath.Base(c.path)
+		res.More = append(res.More, Item{FilePath: c.path, FileName: n, Media: detectMediaType(n)})
+	}
+	return res, nil
+}
+
+// compressMore shrinks oversized videos among an album's extra items.
+func (y YTDLP) compressMore(ctx context.Context, log *slog.Logger, res *Result) {
+	for i := range res.More {
+		if res.More[i].Media == MediaVideo {
+			res.More[i].FilePath = y.compressToFit(ctx, log, res.More[i].FilePath, 0)
+			res.More[i].FileName = filepath.Base(res.More[i].FilePath)
+		}
+	}
 }
 
 func detectMediaType(name string) MediaType {
