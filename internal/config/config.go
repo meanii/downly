@@ -21,6 +21,7 @@ type Downly struct {
 	Limits   Limits   `yaml:"limits"`
 	Admin    Admin    `yaml:"admin"`
 	Cleanup  Cleanup  `yaml:"cleanup"`
+	Cache    Cache    `yaml:"cache"`
 }
 
 type Telegram struct {
@@ -76,6 +77,13 @@ type Admin struct {
 	UserIDs        []int64 `yaml:"user_ids"`
 	StatsChannelID int64   `yaml:"stats_channel_id"`
 	StatsIntervalH int     `yaml:"stats_interval_hours"`
+}
+
+// Cache controls re-sending finished downloads by Telegram file ID.
+type Cache struct {
+	Disabled bool `yaml:"disabled"`
+	// RetentionDays drops entries unused for this long (default 60).
+	RetentionDays int `yaml:"retention_days"`
 }
 
 type Cleanup struct {
@@ -168,6 +176,9 @@ func Load(path string) (*Root, error) {
 
 	if cfg.Downly.Cleanup.RetentionHours <= 0 {
 		cfg.Downly.Cleanup.RetentionHours = 72
+	}
+	if cfg.Downly.Cache.RetentionDays <= 0 {
+		cfg.Downly.Cache.RetentionDays = 60
 	}
 	if cfg.Downly.Admin.StatsIntervalH <= 0 {
 		cfg.Downly.Admin.StatsIntervalH = 24

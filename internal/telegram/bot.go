@@ -36,6 +36,7 @@ type handler struct {
 	pool       *pgxpool.Pool
 	limiter    *rateLimiter
 	commands   map[string]commandFunc
+	msgr       worker.Messenger
 }
 
 // request is a parsed command invocation.
@@ -56,6 +57,7 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 		b:          b,
 		pool:       pool,
 		limiter:    newRateLimiter(time.Duration(cfg.Downly.Limits.RateLimitSeconds) * time.Second),
+		msgr:       worker.TelegramMessenger{Bot: b},
 	}
 	h.commands = h.commandTable()
 
@@ -70,6 +72,12 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 		return u.CallbackQuery != nil && (strings.HasPrefix(u.CallbackQuery.Data, "lang:") || strings.HasPrefix(u.CallbackQuery.Data, "set:"))
 	}, h.onSettingsCallback)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.MyChatMember != nil }, h.onMyChatMember)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "again:")
+	}, h.onAgainCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && u.CallbackQuery.Data == "noop"
+	}, h.onNoopCallback)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
 }
@@ -108,7 +116,7 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
 			url = quality + ":" + url
 		}
-		if _, err := h.enqueue(ctx, chatID, userID, lang, url); err != nil {
+		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: url}); err != nil {
 			// Limit and validation errors were already reported; stop on the
 			// first so a long list does not produce a wall of errors.
 			return
@@ -142,9 +150,21 @@ func parseCommand(text, botUsername string) (name, args string, ok bool) {
 
 // reply sends text, logging failures and noting users who blocked the bot.
 func (h *handler) reply(ctx context.Context, chatID int64, text string) {
-	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
+	h.replyTo(ctx, chatID, 0, text)
+}
+
+// replyTo is reply as an answer to message replyTo (0 = none).
+func (h *handler) replyTo(ctx context.Context, chatID int64, replyTo int, text string) {
+	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text, ReplyParameters: replyParams(replyTo)}); err != nil {
 		h.log.Warn("send message failed", "chat_id", chatID, "error", err)
 	}
+}
+
+func replyParams(messageID int) *models.ReplyParameters {
+	if messageID == 0 {
+		return nil
+	}
+	return &models.ReplyParameters{MessageID: messageID, AllowSendingWithoutReply: true}
 }
 
 func (h *handler) send(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error) {
@@ -250,56 +270,6 @@ func limitMessage(lang i18n.Lang, le *db.LimitError) string {
 	default:
 		return i18n.T(lang, "limit_queue", le.Count)
 	}
-}
-
-// enqueue validates url (optionally mode-prefixed), inserts a job within the
-// user's limits and posts the status message the worker will keep updated.
-// Every failure is reported to the user before returning.
-func (h *handler) enqueue(ctx context.Context, chatID, userID int64, lang i18n.Lang, url string) (int64, error) {
-	log := h.log.With("chat_id", chatID, "user_id", userID)
-	if !isQueueableURL(url) {
-		log.Warn("rejected unsafe url", "url", url)
-		h.reply(ctx, chatID, i18n.T(lang, "url_unsupported"))
-		return 0, safeurl.ErrInvalidURL
-	}
-
-	priority := 0
-	if isAdmin(h.cfg, userID) {
-		priority = 1
-	}
-	reply, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: i18n.T(lang, "queueing")})
-	if err != nil {
-		log.Error("send queue ack failed", "error", err)
-		return 0, err
-	}
-
-	cleanURL, mode, quality := jobSpec(url)
-	jobID, err := db.EnqueueJob(ctx, h.pool, db.NewJob{
-		ChatID: chatID, UserID: userID, URL: cleanURL, Mode: mode, Quality: quality,
-		TelegramMsgID: int64(reply.ID), Priority: priority,
-	}, h.limitsFor(userID))
-	if le, ok := db.IsLimit(err); ok {
-		h.edit(ctx, chatID, reply.ID, limitMessage(lang, le))
-		return 0, err
-	}
-	if err != nil {
-		log.Error("insert job failed", "error", err)
-		h.edit(ctx, chatID, reply.ID, i18n.T(lang, "queue_failed"))
-		return 0, err
-	}
-
-	stats, err := db.GetQueueStats(ctx, h.pool, jobID, userID)
-	if err != nil {
-		log.Error("get queue stats failed", "job_id", jobID, "error", err)
-		stats = &db.QueueStats{}
-	}
-	textOut := i18n.T(lang, "queued", jobID, stats.PendingAhead, stats.Active, stats.UserPending)
-	if priority > 0 {
-		textOut += "\n" + i18n.T(lang, "priority_line", priority)
-	}
-	h.edit(ctx, chatID, reply.ID, textOut)
-	log.Info("job queued", "job_id", jobID, "url", cleanURL, "mode", mode, "quality", quality, "telegram_message_id", reply.ID)
-	return jobID, nil
 }
 
 // rateLimiter enforces a per-user cooldown between submissions. Memory is

@@ -52,7 +52,7 @@ func lockUser(ctx context.Context, tx pgx.Tx, userID int64) error {
 func userCounts(ctx context.Context, q pgx.Tx, userID int64) (pending, daily int, err error) {
 	err = q.QueryRow(ctx, `
 		select count(*) filter (where status = 'pending'),
-		       count(*) filter (where created_at >= now() - interval '24 hours')
+		       count(*) filter (where not cached and created_at >= now() - interval '24 hours')
 		from download_jobs where user_id = $1
 	`, userID).Scan(&pending, &daily)
 	return
@@ -91,10 +91,11 @@ func EnqueueJob(ctx context.Context, pool *pgxpool.Pool, j NewJob, lim EnqueueLi
 	}
 	var id int64
 	if err := tx.QueryRow(ctx, `
-		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id, progress_text, progress_percent)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0)
+		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
+			progress_text, progress_percent, cache_key, inline_message_id)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID).Scan(&id); err != nil {
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit(ctx)
@@ -106,7 +107,7 @@ func QueueRoom(ctx context.Context, pool *pgxpool.Pool, userID int64, lim Enqueu
 	var pending, daily int
 	err := pool.QueryRow(ctx, `
 		select count(*) filter (where status = 'pending'),
-		       count(*) filter (where created_at >= now() - interval '24 hours')
+		       count(*) filter (where not cached and created_at >= now() - interval '24 hours')
 		from download_jobs where user_id = $1
 	`, userID).Scan(&pending, &daily)
 	if err != nil {

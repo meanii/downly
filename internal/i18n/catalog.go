@@ -132,6 +132,9 @@ var catalog = map[Lang]map[string]string{
 		"history_title":     "Your download history:",
 		"position_short":    "position %d",
 		"reason_short":      "reason: %s",
+		"btn_again":         "🔁 Send #%d again",
+		"again_sending":     "Sending it again...",
+		"inline_wait":       "⏳ Downloading. This message will turn into the media when it's ready.",
 	},
 
 	RU: {
@@ -254,6 +257,9 @@ var catalog = map[Lang]map[string]string{
 		"history_title":     "История ваших загрузок:",
 		"position_short":    "место %d",
 		"reason_short":      "причина: %s",
+		"btn_again":         "🔁 Отправить #%d снова",
+		"again_sending":     "Отправляю снова...",
+		"inline_wait":       "⏳ Скачиваю. Это сообщение превратится в медиа, когда всё будет готово.",
 	},
 
 	HI: {
@@ -376,6 +382,9 @@ var catalog = map[Lang]map[string]string{
 		"history_title":     "आपका डाउनलोड इतिहास:",
 		"position_short":    "स्थान %d",
 		"reason_short":      "कारण: %s",
+		"btn_again":         "🔁 #%d फिर से भेजें",
+		"again_sending":     "फिर से भेजा जा रहा है...",
+		"inline_wait":       "⏳ डाउनलोड हो रहा है। तैयार होने पर यह संदेश मीडिया में बदल जाएगा।",
 	},
 
 	FA: {
@@ -498,5 +507,8 @@ var catalog = map[Lang]map[string]string{
 		"history_title":     "سابقه دانلودهای شما:",
 		"position_short":    "جایگاه %d",
 		"reason_short":      "دلیل: %s",
+		"btn_again":         "🔁 ارسال دوباره #%d",
+		"again_sending":     "در حال ارسال دوباره...",
+		"inline_wait":       "⏳ در حال دانلود. وقتی آماده شد، این پیام به رسانه تبدیل می‌شود.",
 	},
 }

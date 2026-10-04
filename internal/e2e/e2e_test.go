@@ -31,6 +31,7 @@ import (
 // otherwise writes a small media file where -o points.
 const fakeYTDLP = `#!/usr/bin/env bash
 set -u
+echo "$*" >> "$(dirname "$0")/calls.log"
 out=""; audio=0; url=""; after_dd=0; dump=0
 while [ $# -gt 0 ]; do
   if [ $after_dd = 1 ]; then url="$1"; shift; continue; fi
@@ -68,9 +69,10 @@ type env struct {
 	b       *bot.Bot
 	pool    *pgxpool.Pool
 	workDir string
+	binDir  string
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
@@ -93,6 +95,9 @@ func newEnv(t *testing.T) *env {
 	cfg.Downly.Limits.MaxConcurrentPerUser = 2
 	cfg.Downly.Limits.MaxRetries = 1
 	cfg.Downly.Services.YTDLP.Bin = bin
+	for _, o := range opts {
+		o(cfg)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	b, err := bot.New("123:TEST", bot.WithServerURL(api.URL()), bot.WithNotAsyncHandlers(),
@@ -124,7 +129,20 @@ func newEnv(t *testing.T) *env {
 	go func() { w.Run(ctx, ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	return &env{t: t, api: api, b: b, pool: pool, workDir: workDir}
+	return &env{t: t, api: api, b: b, pool: pool, workDir: workDir, binDir: filepath.Dir(bin)}
+}
+
+// downloads counts how many times yt-dlp actually downloaded media
+// (metadata-only calls excluded).
+func (e *env) downloads() int {
+	data, _ := os.ReadFile(filepath.Join(e.binDir, "calls.log"))
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" && !strings.Contains(line, "--dump-single-json") {
+			n++
+		}
+	}
+	return n
 }
 
 var updateID int64

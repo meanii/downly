@@ -38,12 +38,13 @@ type Server struct {
 	nextMsgID  int
 	forbidden  map[int64]bool
 	chatAdmins map[string]bool
+	badFileIDs map[string]bool
 	notify     chan struct{}
 }
 
 // New starts a fake API server, closed when the test ends.
 func New(t testing.TB) *Server {
-	s := &Server{forbidden: map[int64]bool{}, chatAdmins: map[string]bool{}, notify: make(chan struct{}, 1)}
+	s := &Server{forbidden: map[int64]bool{}, chatAdmins: map[string]bool{}, badFileIDs: map[string]bool{}, notify: make(chan struct{}, 1)}
 	s.srv = httptest.NewServer(s)
 	t.Cleanup(s.srv.Close)
 	return s
@@ -57,6 +58,14 @@ func (s *Server) URL() string { return s.srv.URL }
 func (s *Server) SetForbidden(chatID int64, v bool) {
 	s.mu.Lock()
 	s.forbidden[chatID] = v
+	s.mu.Unlock()
+}
+
+// RejectFileID makes sends that reuse fileID fail with 400, as Telegram does
+// for expired or foreign file IDs.
+func (s *Server) RejectFileID(fileID string) {
+	s.mu.Lock()
+	s.badFileIDs[fileID] = true
 	s.mu.Unlock()
 }
 
@@ -91,6 +100,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := s.nextMsgID
 	blocked := s.forbidden[chatID]
 	isAdmin := s.chatAdmins[call.Fields["chat_id"]+":"+call.Fields["user_id"]]
+	badFile := false
+	for _, k := range []string{"video", "audio", "photo", "document", "animation"} {
+		if v := call.Fields[k]; v != "" && s.badFileIDs[v] {
+			badFile = true
+		}
+	}
 	s.mu.Unlock()
 	select {
 	case s.notify <- struct{}{}:
@@ -103,13 +118,49 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`)
 		return
 	}
+	if badFile {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: wrong file identifier/HTTP URL specified"}`)
+		return
+	}
 	message := map[string]any{"message_id": id, "date": 0, "chat": map[string]any{"id": chatID, "type": "private"}, "text": call.Fields["text"]}
 	var result any
 	switch method {
 	case "getMe":
 		result = map[string]any{"id": 1, "is_bot": true, "first_name": "Downly", "username": "downly_test_bot"}
-	case "sendMessage", "editMessageText", "sendVideo", "sendAudio", "sendPhoto", "sendDocument":
+	case "sendMessage":
 		result = message
+	case "editMessageText", "editMessageMedia":
+		if call.Fields["inline_message_id"] != "" {
+			result = true
+		} else {
+			result = message
+		}
+	case "sendVideo", "sendAudio", "sendPhoto", "sendDocument", "sendAnimation":
+		field := strings.ToLower(strings.TrimPrefix(method, "send"))
+		fileID := call.Fields[field] // set when re-sending by file ID
+		if fileID == "" {
+			fileID = fmt.Sprintf("file-%d", id)
+		}
+		addFile(message, field, fileID)
+		result = message
+	case "sendMediaGroup":
+		var items []struct {
+			Type  string `json:"type"`
+			Media string `json:"media"`
+		}
+		_ = json.Unmarshal([]byte(call.Fields["media"]), &items)
+		var msgs []map[string]any
+		for i, it := range items {
+			m := map[string]any{"message_id": id*100 + i, "date": 0, "chat": map[string]any{"id": chatID, "type": "private"}}
+			fileID := it.Media
+			if strings.HasPrefix(fileID, "attach://") {
+				fileID = fmt.Sprintf("file-%d-%d", id, i)
+			}
+			addFile(m, it.Type, fileID)
+			msgs = append(msgs, m)
+		}
+		result = msgs
 	case "getChatMember":
 		status := "member"
 		if isAdmin {
@@ -121,6 +172,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result = true
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": result})
+}
+
+// addFile attaches a Telegram file object of the given kind to message.
+func addFile(message map[string]any, kind, fileID string) {
+	file := map[string]any{"file_id": fileID, "file_unique_id": "u" + fileID, "width": 1, "height": 1, "duration": 1}
+	switch kind {
+	case "photo":
+		message["photo"] = []any{file}
+	case "animation":
+		message["animation"] = file
+		message["document"] = file
+	default:
+		message[kind] = file
+	}
 }
 
 // Calls returns a copy of every recorded call.

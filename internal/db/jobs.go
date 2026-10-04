@@ -47,6 +47,9 @@ type Job struct {
 	ProgressText    string
 	ProgressPercent int
 	QueuePosition   int
+	CacheKey        string
+	Cached          bool
+	InlineMessageID string
 	CreatedAt       time.Time
 	StartedAt       *time.Time
 	FinishedAt      *time.Time
@@ -61,6 +64,10 @@ type NewJob struct {
 	Quality       string
 	TelegramMsgID int64
 	Priority      int
+	// CacheKey identifies the content for the media cache ("" = uncacheable).
+	CacheKey string
+	// InlineMessageID is set for inline-mode requests.
+	InlineMessageID string
 }
 
 type QueueStats struct {
@@ -71,13 +78,15 @@ type QueueStats struct {
 
 // jobColumns and scanJob keep every full-row query in sync.
 const jobColumns = `id, chat_id, user_id, url, mode, quality, platform, status, priority, output_path, output_name,
-	error_message, retry_count, telegram_message_id, progress_text, progress_percent, created_at, started_at, finished_at`
+	error_message, retry_count, telegram_message_id, progress_text, progress_percent, cache_key, cached,
+	inline_message_id, created_at, started_at, finished_at`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var job Job
 	err := row.Scan(&job.ID, &job.ChatID, &job.UserID, &job.URL, &job.Mode, &job.Quality, &job.Platform, &job.Status,
 		&job.Priority, &job.OutputPath, &job.OutputName, &job.ErrorMessage, &job.RetryCount, &job.TelegramMsgID,
-		&job.ProgressText, &job.ProgressPercent, &job.CreatedAt, &job.StartedAt, &job.FinishedAt)
+		&job.ProgressText, &job.ProgressPercent, &job.CacheKey, &job.Cached, &job.InlineMessageID,
+		&job.CreatedAt, &job.StartedAt, &job.FinishedAt)
 	return job, err
 }
 
@@ -104,10 +113,11 @@ func InsertJob(ctx context.Context, pool *pgxpool.Pool, j NewJob) (int64, error)
 	}
 	var jobID int64
 	err := pool.QueryRow(ctx, `
-		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id, progress_text, progress_percent)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0)
+		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
+			progress_text, progress_percent, cache_key, inline_message_id)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID).Scan(&jobID)
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID).Scan(&jobID)
 	return jobID, err
 }
 
@@ -349,7 +359,7 @@ func UserDailyJobCount(ctx context.Context, pool *pgxpool.Pool, userID int64) (i
 	var count int
 	err := pool.QueryRow(ctx, `
 		select count(*) from download_jobs
-		where user_id = $1 and created_at >= now() - interval '24 hours'
+		where user_id = $1 and not cached and created_at >= now() - interval '24 hours'
 	`, userID).Scan(&count)
 	return count, err
 }

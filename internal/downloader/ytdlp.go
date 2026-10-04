@@ -108,6 +108,7 @@ type Result struct {
 	Platform      string
 	Media         MediaType
 	Title         string
+	Performer     string
 	Duration      int
 	ThumbnailPath string
 }
@@ -116,6 +117,8 @@ type mediaInfo struct {
 	Extractor      string  `json:"extractor_key"`
 	ThumbnailURL   string  `json:"thumbnail"`
 	Title          string  `json:"title"`
+	Artist         string  `json:"artist"`
+	Uploader       string  `json:"uploader"`
 	ID             string  `json:"id"`
 	Duration       float64 `json:"duration"`
 	Width          int     `json:"width"`
@@ -123,6 +126,14 @@ type mediaInfo struct {
 	Filesize       int64   `json:"filesize"`
 	FilesizeApprox int64   `json:"filesize_approx"`
 	Platform       string  `json:"-"`
+}
+
+// performer is who to credit for audio: the artist if known, else the uploader.
+func (m mediaInfo) performer() string {
+	if m.Artist != "" {
+		return m.Artist
+	}
+	return m.Uploader
 }
 
 var progressRE = regexp.MustCompile(`\[download\]\s+([0-9.]+)%`)
@@ -314,6 +325,7 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	if result.Media == MediaDocument && isVideoFile(result.FileName) {
@@ -390,6 +402,7 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 	}
 	result.Media = MediaAudio
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	return result, nil
@@ -526,6 +539,7 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	if result.Media == MediaDocument && isVideoFile(result.FileName) {
@@ -592,6 +606,7 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 	}
 
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	return result, nil
@@ -619,6 +634,7 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		if findErr == nil {
 			result.Media = MediaPhoto
 			result.Title = meta.Title
+			result.Performer = meta.performer()
 			return result, nil
 		}
 		log.Warn("thumbnail file not found after download", "error", findErr)

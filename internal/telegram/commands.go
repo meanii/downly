@@ -108,7 +108,10 @@ func (h *handler) cmdHistory(ctx context.Context, r *request) {
 		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "generic_error"))
 		return
 	}
-	h.reply(ctx, r.msg.Chat.ID, formatUserHistory(r.lang, jobs))
+	text := formatUserHistory(r.lang, jobs)
+	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: r.msg.Chat.ID, Text: text, ReplyMarkup: againKeyboard(r.lang, jobs)}); err != nil {
+		h.log.Warn("send history failed", "error", err)
+	}
 }
 
 func (h *handler) cmdCancel(ctx context.Context, r *request) {
@@ -160,7 +163,7 @@ func (h *handler) cmdMP3(ctx context.Context, r *request) {
 	if !h.allowSubmit(ctx, r.msg.Chat.ID, r.msg.From.ID, r.lang) {
 		return
 	}
-	_, _ = h.enqueue(ctx, r.msg.Chat.ID, r.msg.From.ID, r.lang, "audio:"+url)
+	_, _ = h.enqueue(ctx, download{chatID: r.msg.Chat.ID, userID: r.msg.From.ID, lang: r.lang, url: "audio:" + url})
 }
 
 // Quality options for the one-off /quality picker.
@@ -343,7 +346,7 @@ func (h *handler) cmdPlaylist(ctx context.Context, r *request) {
 		if quality != "" {
 			u = quality + ":" + u
 		}
-		if _, err := h.enqueue(ctx, chatID, userID, lang, u); err != nil {
+		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: u}); err != nil {
 			if _, isLimit := db.IsLimit(err); isLimit {
 				break
 			}
@@ -371,7 +374,11 @@ func (h *handler) cmdStats(ctx context.Context, r *request) {
 	if err != nil {
 		h.log.Warn("load top platforms failed", "error", err)
 	}
-	h.reply(ctx, r.msg.Chat.ID, db.FormatBotStats(stats, topUsers, topPlatforms))
+	text := db.FormatBotStats(stats, topUsers, topPlatforms)
+	if cs, err := db.GetCacheStats(ctx, h.pool); err == nil {
+		text += fmt.Sprintf("\n\nMedia cache: %d files, %d instant re-sends", cs.Entries, cs.Hits)
+	}
+	h.reply(ctx, r.msg.Chat.ID, text)
 }
 
 func (h *handler) cmdHealth(ctx context.Context, r *request) {

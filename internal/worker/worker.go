@@ -18,6 +18,7 @@ import (
 	"github.com/meanii/downly/internal/downloader"
 	"github.com/meanii/downly/internal/health"
 	"github.com/meanii/downly/internal/i18n"
+	"github.com/meanii/downly/internal/media"
 	"github.com/meanii/downly/internal/tgutil"
 )
 
@@ -176,7 +177,8 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 	}
 
 	progress.Force("Uploading to Telegram", 99)
-	err = uploadWithRetry(runCtx, w.Msg, job.ChatID, res, buildCaption(lang, res), fi.Size())
+	meta := MetaFromResult(res, fi.Size())
+	items, err := uploadWithRetry(runCtx, w.Msg, job.ChatID, res, SendOptions{Caption: Caption(lang, meta)}, fi.Size())
 	if runCtx.Err() != nil && w.handleInterrupted(workCtx, runCtx, log, job, lang) {
 		return
 	}
@@ -198,6 +200,8 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 	if err := db.MarkDone(fctx, w.Pool, job.ID, res.FilePath, res.FileName, res.Platform, fi.Size()); err != nil {
 		log.Error("mark done failed", "error", err)
 	}
+	w.remember(fctx, log, job, items, meta)
+	w.finishInline(fctx, log, job, lang, items, meta)
 	w.editFinal(fctx, job, formatDoneMessage(lang, job.ID, res))
 	w.count("done")
 	log.Info("job finished", "platform", res.Platform, "file_name", res.FileName)
@@ -290,6 +294,11 @@ func (w *Worker) fail(workCtx context.Context, log *slog.Logger, job *db.Job, la
 		log.Error("mark failed failed", "error", dbErr)
 	}
 	w.editFinal(fctx, job, formatFailureMessage(lang, job.ID, userMsg))
+	if job.InlineMessageID != "" {
+		if err := w.Msg.EditInlineText(fctx, job.InlineMessageID, "❌ "+userMsg); err != nil {
+			log.Warn("edit inline message failed", "error", err)
+		}
+	}
 	w.count("failed")
 }
 
@@ -326,6 +335,29 @@ func (w *Worker) finalizeCtx(workCtx context.Context) (context.Context, context.
 // editFinal shows a final status, waiting out a 429 rather than dropping it.
 func (w *Worker) editFinal(ctx context.Context, job *db.Job, text string) {
 	_ = tgutil.Call(ctx, 3, func() error { return w.Msg.Edit(ctx, job.ChatID, int(job.TelegramMsgID), text) })
+}
+
+// remember stores the uploaded file IDs so the same request is served
+// instantly next time.
+func (w *Worker) remember(ctx context.Context, log *slog.Logger, job *db.Job, items []media.Item, meta media.Meta) {
+	if job.CacheKey == "" || len(items) == 0 || w.Cfg.Downly.Cache.Disabled {
+		return
+	}
+	if err := db.PutCache(ctx, w.Pool, &db.CacheEntry{Key: job.CacheKey, Items: items, Meta: meta}); err != nil {
+		log.Warn("store media cache failed", "error", err)
+	}
+}
+
+// finishInline swaps an inline-mode placeholder for the downloaded media.
+// Telegram cannot upload into inline messages, so this reuses the file ID
+// from the copy just sent to the user's private chat.
+func (w *Worker) finishInline(ctx context.Context, log *slog.Logger, job *db.Job, lang i18n.Lang, items []media.Item, meta media.Meta) {
+	if job.InlineMessageID == "" || len(items) == 0 {
+		return
+	}
+	if err := w.Msg.EditInlineMedia(ctx, job.InlineMessageID, items[0], Caption(lang, meta)); err != nil {
+		log.Warn("edit inline media failed", "error", err)
+	}
 }
 
 // jobLang picks the language for a job's messages: the chat's setting, then
