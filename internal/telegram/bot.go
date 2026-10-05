@@ -36,6 +36,7 @@ type handler struct {
 	pool       *pgxpool.Pool
 	limiter    *rateLimiter
 	commands   map[string]commandFunc
+	msgr       worker.Messenger
 }
 
 // request is a parsed command invocation.
@@ -56,10 +57,15 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 		b:          b,
 		pool:       pool,
 		limiter:    newRateLimiter(time.Duration(cfg.Downly.Limits.RateLimitSeconds) * time.Second),
+		msgr:       worker.TelegramMessenger{Bot: b},
 	}
 	h.commands = h.commandTable()
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypeContains, h.onMessage)
+	// Only messages with text: service messages (payments, joins) have none
+	// and need their own handlers below.
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.Text != ""
+	}, h.onMessage)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "dl:")
 	}, h.onQualityCallback)
@@ -70,6 +76,22 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 		return u.CallbackQuery != nil && (strings.HasPrefix(u.CallbackQuery.Data, "lang:") || strings.HasPrefix(u.CallbackQuery.Data, "set:"))
 	}, h.onSettingsCallback)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.MyChatMember != nil }, h.onMyChatMember)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "again:")
+	}, h.onAgainCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && u.CallbackQuery.Data == "noop"
+	}, h.onNoopCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "unf:")
+	}, h.onUnfollowCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && u.CallbackQuery.Data == "buy:premium"
+	}, h.onBuyCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.PreCheckoutQuery != nil }, h.onPreCheckout)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.SuccessfulPayment != nil
+	}, h.onSuccessfulPayment)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
 }
@@ -93,27 +115,56 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 
-	urls := extractURLs(text)
-	if len(urls) == 0 {
+	reqs := extractRequests(text)
+	if len(reqs) == 0 {
 		return
 	}
+	if isGroup(msg.Chat) {
+		mode, err := db.GetGroupMode(ctx, h.pool, msg.Chat.ID)
+		if err != nil {
+			h.log.Warn("load group mode failed", "chat_id", msg.Chat.ID, "error", err)
+		}
+		if mode == db.GroupModeCommand {
+			return // this group only downloads via /dl
+		}
+	}
+	h.downloadAll(ctx, msg, reqs, msg.ID, false)
+}
+
+// downloadAll queues every request from msg (as GIFs when gif is set). In
+// groups the bot answers replyTo (the message holding the links); in
+// private chats it doesn't thread replies.
+func (h *handler) downloadAll(ctx context.Context, msg *models.Message, reqs []urlRequest, replyTo int, gif bool) {
 	chatID, userID := msg.Chat.ID, msg.From.ID
 	lang := h.langFor(ctx, chatID, msg.From)
+	if !isGroup(msg.Chat) {
+		replyTo = 0
+	}
 	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
 	quality := h.preferredQuality(ctx, userID)
-	for _, url := range urls {
+	for _, req := range reqs {
+		if text, ok := checkClip(lang, req.clip, gif); !ok {
+			h.replyTo(ctx, chatID, replyTo, text)
+			return
+		}
+		url := req.url
 		// Apply the user's quality preference if no explicit prefix
-		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
+		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" && !gif {
 			url = quality + ":" + url
 		}
-		if _, err := h.enqueue(ctx, chatID, userID, lang, url); err != nil {
+		d := download{chatID: chatID, userID: userID, lang: lang, url: url, replyTo: replyTo, clip: req.clip, gif: gif}
+		if _, err := h.enqueue(ctx, d); err != nil {
 			// Limit and validation errors were already reported; stop on the
 			// first so a long list does not produce a wall of errors.
 			return
 		}
 	}
+}
+
+func isGroup(chat models.Chat) bool {
+	return chat.Type == models.ChatTypeGroup || chat.Type == models.ChatTypeSupergroup
 }
 
 // parseCommand splits "/name@bot args" into ("name", "args"). ok is false
@@ -142,9 +193,21 @@ func parseCommand(text, botUsername string) (name, args string, ok bool) {
 
 // reply sends text, logging failures and noting users who blocked the bot.
 func (h *handler) reply(ctx context.Context, chatID int64, text string) {
-	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
+	h.replyTo(ctx, chatID, 0, text)
+}
+
+// replyTo is reply as an answer to message replyTo (0 = none).
+func (h *handler) replyTo(ctx context.Context, chatID int64, replyTo int, text string) {
+	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text, ReplyParameters: replyParams(replyTo)}); err != nil {
 		h.log.Warn("send message failed", "chat_id", chatID, "error", err)
 	}
+}
+
+func replyParams(messageID int) *models.ReplyParameters {
+	if messageID == 0 {
+		return nil
+	}
+	return &models.ReplyParameters{MessageID: messageID, AllowSendingWithoutReply: true}
 }
 
 func (h *handler) send(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error) {
@@ -235,9 +298,14 @@ func (h *handler) preferredQuality(ctx context.Context, userID int64) string {
 	return ""
 }
 
-func (h *handler) limitsFor(userID int64) db.EnqueueLimits {
+func (h *handler) limitsFor(ctx context.Context, userID int64) db.EnqueueLimits {
 	lim := db.EnqueueLimits{MaxQueued: h.cfg.Downly.Limits.MaxQueuedPerUser}
-	if !isAdmin(h.cfg, userID) {
+	switch {
+	case isAdmin(h.cfg, userID):
+	case h.isPremium(ctx, userID):
+		lim.MaxQueued = max(lim.MaxQueued, h.cfg.Downly.Premium.MaxQueued)
+		lim.DailyQuota = h.cfg.Downly.Premium.DailyQuota // 0 = unlimited
+	default:
 		lim.DailyQuota = h.cfg.Downly.Limits.DailyQuotaPerUser
 	}
 	return lim
@@ -250,56 +318,6 @@ func limitMessage(lang i18n.Lang, le *db.LimitError) string {
 	default:
 		return i18n.T(lang, "limit_queue", le.Count)
 	}
-}
-
-// enqueue validates url (optionally mode-prefixed), inserts a job within the
-// user's limits and posts the status message the worker will keep updated.
-// Every failure is reported to the user before returning.
-func (h *handler) enqueue(ctx context.Context, chatID, userID int64, lang i18n.Lang, url string) (int64, error) {
-	log := h.log.With("chat_id", chatID, "user_id", userID)
-	if !isQueueableURL(url) {
-		log.Warn("rejected unsafe url", "url", url)
-		h.reply(ctx, chatID, i18n.T(lang, "url_unsupported"))
-		return 0, safeurl.ErrInvalidURL
-	}
-
-	priority := 0
-	if isAdmin(h.cfg, userID) {
-		priority = 1
-	}
-	reply, err := h.send(ctx, &bot.SendMessageParams{ChatID: chatID, Text: i18n.T(lang, "queueing")})
-	if err != nil {
-		log.Error("send queue ack failed", "error", err)
-		return 0, err
-	}
-
-	cleanURL, mode, quality := jobSpec(url)
-	jobID, err := db.EnqueueJob(ctx, h.pool, db.NewJob{
-		ChatID: chatID, UserID: userID, URL: cleanURL, Mode: mode, Quality: quality,
-		TelegramMsgID: int64(reply.ID), Priority: priority,
-	}, h.limitsFor(userID))
-	if le, ok := db.IsLimit(err); ok {
-		h.edit(ctx, chatID, reply.ID, limitMessage(lang, le))
-		return 0, err
-	}
-	if err != nil {
-		log.Error("insert job failed", "error", err)
-		h.edit(ctx, chatID, reply.ID, i18n.T(lang, "queue_failed"))
-		return 0, err
-	}
-
-	stats, err := db.GetQueueStats(ctx, h.pool, jobID, userID)
-	if err != nil {
-		log.Error("get queue stats failed", "job_id", jobID, "error", err)
-		stats = &db.QueueStats{}
-	}
-	textOut := i18n.T(lang, "queued", jobID, stats.PendingAhead, stats.Active, stats.UserPending)
-	if priority > 0 {
-		textOut += "\n" + i18n.T(lang, "priority_line", priority)
-	}
-	h.edit(ctx, chatID, reply.ID, textOut)
-	log.Info("job queued", "job_id", jobID, "url", cleanURL, "mode", mode, "quality", quality, "telegram_message_id", reply.ID)
-	return jobID, nil
 }
 
 // rateLimiter enforces a per-user cooldown between submissions. Memory is

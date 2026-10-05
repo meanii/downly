@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/dbtest"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/subscriptions"
 	tg "github.com/meanii/downly/internal/telegram"
 	"github.com/meanii/downly/internal/tgtest"
 	"github.com/meanii/downly/internal/worker"
@@ -31,7 +33,8 @@ import (
 // otherwise writes a small media file where -o points.
 const fakeYTDLP = `#!/usr/bin/env bash
 set -u
-out=""; audio=0; url=""; after_dd=0; dump=0
+echo "$*" >> "$(dirname "$0")/calls.log"
+out=""; audio=0; url=""; after_dd=0; dump=0; yes_playlist=0; flat=0
 while [ $# -gt 0 ]; do
   if [ $after_dd = 1 ]; then url="$1"; shift; continue; fi
   case "$1" in
@@ -39,23 +42,54 @@ while [ $# -gt 0 ]; do
     -o) out="$2"; shift ;;
     -x) audio=1 ;;
     --dump-single-json) dump=1 ;;
+    --yes-playlist) yes_playlist=1 ;;
+    --flat-playlist) flat=1 ;;
   esac
   shift
 done
 if [ -z "$url" ]; then echo "ERROR: URL must come after --" >&2; exit 2; fi
 case "$url" in
   *private*) echo "ERROR: [youtube] vid42: Private video. Sign in if you've been granted access" >&2; exit 1 ;;
+  *unsupported*) echo "ERROR: Unsupported URL: $url" >&2; exit 1 ;;
 esac
+# Channel/playlist listings come from feed.json, which tests rewrite.
+if [ $flat = 1 ]; then
+  cat "$(dirname "$0")/feed.json" 2>/dev/null || { echo "ERROR: no feed" >&2; exit 1; }
+  exit 0
+fi
 if [ $dump = 1 ]; then
   printf '%s\n' '{"extractor_key":"Youtube","title":"E2E Видео","id":"vid42","duration":65}'
   exit 0
 fi
+# A carousel post: three items, but only the first without --yes-playlist.
+case "$url" in
+  *carousel*)
+    n=1; [ $yes_playlist = 1 ] && n=3
+    for i in $(seq 1 $n); do
+      ext=jpg; [ $i = 2 ] && ext=mp4
+      f="${out//"%(id)s"/c$i}"; f="${f//"%(ext)s"/$ext}"
+      printf 'ITEM-%s' "$i" > "$f"; sleep 0.05
+    done
+    exit 0 ;;
+esac
 ext=mp4; [ $audio = 1 ] && ext=mp3
 file="${out//"%(id)s"/vid42}"; file="${file//"%(ext)s"/$ext}"
 echo "[download] Destination: $file"
 echo "[download]  50.0% of 1.00MiB"
 printf 'FAKE-MEDIA-%s' "$ext" > "$file"
 echo "[download] 100% of 1.00MiB"
+`
+
+// fakeFFmpeg stands in for the GIF conversion: it copies the -i input to
+// the output path (the last argument).
+const fakeFFmpeg = `#!/usr/bin/env bash
+in=""; prev=""; last=""
+for a in "$@"; do
+  [ "$prev" = "-i" ] && in="$a"
+  prev="$a"; last="$a"
+done
+echo "$*" >> "$(dirname "$0")/ffmpeg.log"
+cp "$in" "$last"
 `
 
 // A literal public IP keeps URL validation offline (no DNS lookup); the fake
@@ -68,9 +102,14 @@ type env struct {
 	b       *bot.Bot
 	pool    *pgxpool.Pool
 	workDir string
+	binDir  string
+	poller  *subscriptions.Poller
+
+	mu        sync.Mutex
+	processed map[int64]bool // jobs the worker has completely finished
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
@@ -80,6 +119,10 @@ func newEnv(t *testing.T) *env {
 
 	bin := filepath.Join(t.TempDir(), "yt-dlp")
 	if err := os.WriteFile(bin, []byte(fakeYTDLP), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ffmpeg := filepath.Join(filepath.Dir(bin), "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte(fakeFFmpeg), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	workDir := t.TempDir()
@@ -93,6 +136,9 @@ func newEnv(t *testing.T) *env {
 	cfg.Downly.Limits.MaxConcurrentPerUser = 2
 	cfg.Downly.Limits.MaxRetries = 1
 	cfg.Downly.Services.YTDLP.Bin = bin
+	for _, o := range opts {
+		o(cfg)
+	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	b, err := bot.New("123:TEST", bot.WithServerURL(api.URL()), bot.WithNotAsyncHandlers(),
@@ -103,43 +149,86 @@ func newEnv(t *testing.T) *env {
 	controller := worker.NewController()
 	tg.RegisterHandlers(logger, cfg, controller, b, pool)
 
+	e := &env{t: t, processed: map[int64]bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	waker := worker.NewWaker()
 	go worker.Listen(ctx, logger, pool, waker)
+	dl := downloader.YTDLP{
+		Bin:           bin,
+		MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
+		// The literal-IP test host stands in for an album site.
+		AlbumHosts: []string{"1.1.1.1"},
+		FFmpegBin:  ffmpeg,
+		Logger:     logger,
+	}
 	w := &worker.Worker{
-		ID:   "e2e-1",
-		Cfg:  cfg,
-		Pool: pool,
-		DL: downloader.YTDLP{
-			Bin:           bin,
-			MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
-			Logger:        logger,
-		},
+		ID:         "e2e-1",
+		Cfg:        cfg,
+		Pool:       pool,
+		DL:         dl,
 		Msg:        worker.TelegramMessenger{Bot: b},
 		Controller: controller,
-		Waker:      waker,
-		Log:        logger,
+		AfterJob: func(id int64) {
+			e.mu.Lock()
+			e.processed[id] = true
+			e.mu.Unlock()
+		},
+		Waker: waker,
+		Log:   logger,
 	}
 	done := make(chan struct{})
 	go func() { w.Run(ctx, ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	return &env{t: t, api: api, b: b, pool: pool, workDir: workDir}
+	poller := &subscriptions.Poller{Pool: pool, Fetcher: dl, Interval: time.Hour, Log: logger}
+	e.api, e.b, e.pool, e.workDir, e.binDir, e.poller = api, b, pool, workDir, filepath.Dir(bin), poller
+	return e
+}
+
+// ytdlpCalls returns the argument lists of yt-dlp download calls.
+func (e *env) ytdlpCalls() []string {
+	data, _ := os.ReadFile(filepath.Join(e.binDir, "calls.log"))
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" && !strings.Contains(line, "--dump-single-json") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// downloads counts how many times yt-dlp actually downloaded media
+// (metadata-only calls excluded).
+func (e *env) downloads() int {
+	data, _ := os.ReadFile(filepath.Join(e.binDir, "calls.log"))
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" && !strings.Contains(line, "--dump-single-json") {
+			n++
+		}
+	}
+	return n
 }
 
 var updateID int64
 
-func (e *env) send(chat models.Chat, userID int64, text string) {
+// send delivers a text message and returns its message ID.
+func (e *env) send(chat models.Chat, userID int64, text string) int {
+	return e.sendReply(chat, userID, text, nil)
+}
+
+// sendReply delivers a message answering replyTo (nil = not a reply).
+func (e *env) sendReply(chat models.Chat, userID int64, text string, replyTo *models.Message) int {
 	updateID++
-	e.b.ProcessUpdate(context.Background(), &models.Update{
-		ID: updateID,
-		Message: &models.Message{
-			ID:   int(updateID),
-			From: &models.User{ID: userID, FirstName: "U"},
-			Chat: chat,
-			Text: text,
-		},
-	})
+	msg := &models.Message{
+		ID:             int(updateID),
+		From:           &models.User{ID: userID, FirstName: "U"},
+		Chat:           chat,
+		Text:           text,
+		ReplyToMessage: replyTo,
+	}
+	e.b.ProcessUpdate(context.Background(), &models.Update{ID: updateID, Message: msg})
+	return msg.ID
 }
 
 func (e *env) press(chat models.Chat, userID int64, data string) {
@@ -167,7 +256,14 @@ func (e *env) waitJob(userID int64) db.Job {
 		if len(jobs) == 1 {
 			switch jobs[0].Status {
 			case db.StatusDone, db.StatusFailed, db.StatusCanceled:
-				return jobs[0]
+				// Cache hits finish in the handler; worker jobs must also have
+				// sent their final messages.
+				e.mu.Lock()
+				done := jobs[0].Cached || e.processed[jobs[0].ID]
+				e.mu.Unlock()
+				if done {
+					return jobs[0]
+				}
 			}
 		}
 		select {
@@ -240,9 +336,17 @@ func TestE2EVideoInRussian(t *testing.T) {
 		t.Fatal("queue ack not in Russian")
 	}
 
-	entries, _ := os.ReadDir(e.workDir)
-	if len(entries) != 0 {
-		t.Fatalf("work dir not cleaned up: %v", entries)
+	// The job is marked done just before the worker removes its directory.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, _ := os.ReadDir(e.workDir)
+		if len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("work dir not cleaned up: %v", entries)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

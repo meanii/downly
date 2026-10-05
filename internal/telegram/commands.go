@@ -26,6 +26,14 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"quality":    h.cmdQuality,
 		"playlist":   h.cmdPlaylist,
 		"settings":   h.cmdSettings,
+		"dl":         h.cmdDL,
+		"clip":       h.cmdClip,
+		"follow":     h.cmdFollow,
+		"following":  h.cmdFollowing,
+		"unfollow":   h.cmdUnfollow,
+		"premium":    h.cmdPremium,
+		"paysupport": h.cmdPaySupport,
+		"gif":        h.cmdGIF,
 		"language":   h.cmdLanguage,
 		"priority": func(ctx context.Context, r *request) {
 			h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "priority_info"))
@@ -42,6 +50,7 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"broadcast": h.cmdBroadcast,
 		"ban":       h.cmdBan,
 		"unban":     h.cmdUnban,
+		"refund":    h.cmdRefund,
 	}
 	for name, fn := range admin {
 		user[name] = h.adminOnly(fn)
@@ -81,10 +90,14 @@ const adminHelp = "Admin commands:\n" +
 	"/jobs - active and pending jobs\n" +
 	"/promote, /demote <job_id> - change priority\n" +
 	"/broadcast <msg> - message all users\n" +
-	"/ban, /unban <user_id> - block/unblock user"
+	"/ban, /unban <user_id> - block/unblock user\n" +
+	"/refund <charge_id> - refund a Stars payment"
 
 func (h *handler) helpText(ctx context.Context, lang i18n.Lang, userID int64) string {
 	text := i18n.T(lang, "start", getBotUsername(ctx, h.b))
+	if h.premiumEnabled() {
+		text += "\n/premium - " + i18n.T(lang, "cmd_premium")
+	}
 	if isAdmin(h.cfg, userID) {
 		text += "\n\n" + adminHelp
 	}
@@ -108,7 +121,10 @@ func (h *handler) cmdHistory(ctx context.Context, r *request) {
 		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "generic_error"))
 		return
 	}
-	h.reply(ctx, r.msg.Chat.ID, formatUserHistory(r.lang, jobs))
+	text := formatUserHistory(r.lang, jobs)
+	if _, err := h.send(ctx, &bot.SendMessageParams{ChatID: r.msg.Chat.ID, Text: text, ReplyMarkup: againKeyboard(r.lang, jobs)}); err != nil {
+		h.log.Warn("send history failed", "error", err)
+	}
 }
 
 func (h *handler) cmdCancel(ctx context.Context, r *request) {
@@ -146,6 +162,23 @@ func (h *handler) cmdCancel(ctx context.Context, r *request) {
 	}
 }
 
+// cmdDL downloads the links in its arguments or, when used as a reply, in
+// the replied-to message. It is how groups in "command" mode download.
+func (h *handler) cmdDL(ctx context.Context, r *request) {
+	reqs := extractRequests(r.args)
+	replyTo := r.msg.ID
+	if len(reqs) == 0 && r.msg.ReplyToMessage != nil {
+		orig := r.msg.ReplyToMessage
+		reqs = extractRequests(orig.Text + " " + orig.Caption)
+		replyTo = orig.ID
+	}
+	if len(reqs) == 0 {
+		h.reply(ctx, r.msg.Chat.ID, i18n.T(r.lang, "dl_usage"))
+		return
+	}
+	h.downloadAll(ctx, r.msg, reqs, replyTo, false)
+}
+
 func (h *handler) cmdMP3(ctx context.Context, r *request) {
 	fields := strings.Fields(r.args)
 	if len(fields) < 1 {
@@ -160,7 +193,7 @@ func (h *handler) cmdMP3(ctx context.Context, r *request) {
 	if !h.allowSubmit(ctx, r.msg.Chat.ID, r.msg.From.ID, r.lang) {
 		return
 	}
-	_, _ = h.enqueue(ctx, r.msg.Chat.ID, r.msg.From.ID, r.lang, "audio:"+url)
+	_, _ = h.enqueue(ctx, download{chatID: r.msg.Chat.ID, userID: r.msg.From.ID, lang: r.lang, url: "audio:" + url})
 }
 
 // Quality options for the one-off /quality picker.
@@ -299,7 +332,7 @@ func (h *handler) cmdPlaylist(ctx context.Context, r *request) {
 
 	// Only fetch and queue what the user's limits leave room for, instead of
 	// queueing until the limit trips once per remaining entry.
-	room, err := db.QueueRoom(ctx, h.pool, userID, h.limitsFor(userID))
+	room, err := db.QueueRoom(ctx, h.pool, userID, h.limitsFor(ctx, userID))
 	if err != nil {
 		h.log.Error("queue room check failed", "user_id", userID, "error", err)
 		h.reply(ctx, chatID, i18n.T(lang, "generic_error"))
@@ -343,7 +376,7 @@ func (h *handler) cmdPlaylist(ctx context.Context, r *request) {
 		if quality != "" {
 			u = quality + ":" + u
 		}
-		if _, err := h.enqueue(ctx, chatID, userID, lang, u); err != nil {
+		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: u}); err != nil {
 			if _, isLimit := db.IsLimit(err); isLimit {
 				break
 			}
@@ -371,7 +404,17 @@ func (h *handler) cmdStats(ctx context.Context, r *request) {
 	if err != nil {
 		h.log.Warn("load top platforms failed", "error", err)
 	}
-	h.reply(ctx, r.msg.Chat.ID, db.FormatBotStats(stats, topUsers, topPlatforms))
+	text := db.FormatBotStats(stats, topUsers, topPlatforms)
+	if cs, err := db.GetCacheStats(ctx, h.pool); err == nil {
+		text += fmt.Sprintf("\n\nMedia cache: %d files, %d instant re-sends", cs.Entries, cs.Hits)
+	}
+	if ret, err := db.GetRetention(ctx, h.pool); err == nil {
+		text += fmt.Sprintf("\n\nUsers (7d): %d active, %d new, %d returning", ret.ActiveUsers7d, ret.NewUsers7d, ret.Returning7d)
+		if h.premiumEnabled() {
+			text += fmt.Sprintf("\nPremium: %d active, %d payments, %d Stars revenue", ret.ActivePremium, ret.PaymentsTotal, ret.StarsRevenue)
+		}
+	}
+	h.reply(ctx, r.msg.Chat.ID, text)
 }
 
 func (h *handler) cmdHealth(ctx context.Context, r *request) {

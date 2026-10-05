@@ -24,6 +24,7 @@ import (
 	mig "github.com/meanii/downly/internal/migrate"
 	"github.com/meanii/downly/internal/reaper"
 	"github.com/meanii/downly/internal/statsreport"
+	"github.com/meanii/downly/internal/subscriptions"
 	tgbot "github.com/meanii/downly/internal/telegram"
 	"github.com/meanii/downly/internal/tgutil"
 	"github.com/meanii/downly/internal/updater"
@@ -105,13 +106,14 @@ func main() {
 
 	controller := worker.NewController()
 	tgbot.RegisterHandlers(logger, cfg, controller, b, pool)
-	go tgbot.SetCommandMenus(ctx, b, logger.With("component", "telegram"))
+	go tgbot.SetCommandMenus(ctx, b, logger.With("component", "telegram"), cfg.Downly.Premium.Enabled)
 
 	// Anything in the work dir older than one job timeout is from a crash.
 	worker.SweepWorkDir(logger, cfg.Downly.Worker.WorkDir, time.Duration(cfg.Downly.Worker.JobTimeoutMinutes)*time.Minute)
 
 	// Background services
-	go cleanup.Loop(ctx, logger, pool, cfg.Downly.Cleanup.Enabled, cfg.Downly.Cleanup.RetentionHours)
+	go cleanup.Loop(ctx, logger, pool, cfg.Downly.Cleanup.Enabled, cfg.Downly.Cleanup.RetentionHours,
+		time.Duration(cfg.Downly.Cache.RetentionDays)*24*time.Hour)
 	go updater.Loop(ctx, logger, cfg.Downly.Services.YTDLP.Bin, cfg.Downly.Services.YTDLP.AutoUpdateHours)
 	go reaper.Loop(ctx, logger, pool, cfg.Downly.Worker.StuckJobMinutes, cfg.Downly.Limits.MaxRetries)
 	go statsreport.Loop(ctx, logger, pool, b, cfg.Downly.Admin.StatsChannelID, cfg.Downly.Admin.StatsIntervalH)
@@ -144,8 +146,19 @@ func main() {
 		CookiesFile:   cfg.Downly.Services.YTDLP.CookiesFile,
 		MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
 		MaxDownloadMB: cfg.Downly.Worker.MaxDownloadMB,
+		AlbumHosts:    cfg.Downly.Services.YTDLP.AlbumHosts,
 		Logger:        logger,
 	}
+	if !cfg.Downly.Subscriptions.Disabled {
+		poller := &subscriptions.Poller{
+			Pool:     pool,
+			Fetcher:  dl,
+			Interval: time.Duration(cfg.Downly.Subscriptions.IntervalMinutes) * time.Minute,
+			Log:      logger,
+		}
+		go poller.Run(claimCtx)
+	}
+
 	host, _ := os.Hostname()
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Downly.Worker.NumberOfWorkers; i++ {
