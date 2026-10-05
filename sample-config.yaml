@@ -1,7 +1,8 @@
 downly:
 
   telegram:
-    bot_token: ""
+    bot_token: ""              # or set DOWNLY_BOT_TOKEN
+    # api_url: "http://telegram-bot-api:8081"  # optional local Bot API server (2GB uploads)
 
   database:
     postgres_url: "postgresql://downly:downly@localhost:5432/downly"
@@ -12,7 +13,9 @@ downly:
     work_dir: "./tmp"
     max_file_size_mb: 50        # Telegram Bot API upload limit
     max_download_size_mb: 200   # larger videos are compressed to fit max_file_size_mb
-    stuck_job_minutes: 15
+    stuck_job_minutes: 5         # requeue jobs whose worker stopped heartbeating this long
+    job_timeout_minutes: 30      # max time for one download attempt
+    shutdown_grace_seconds: 60   # let running jobs finish on SIGTERM before requeueing
     health_port: 8080
 
   limits:
@@ -37,3 +40,20 @@ downly:
       bin: "yt-dlp"
       cookies_file: "/app/cookies/instagram.txt"
       auto_update_hours: 6
+      # album_hosts: ["instagram.com", "x.com"]  # override the album site list
+
+  cache:
+    disabled: false
+    retention_days: 60
+
+  subscriptions:
+    disabled: false
+    interval_minutes: 60
+    max_per_chat: 5
+
+  premium:
+    enabled: false        # sell Premium for Telegram Stars
+    price_stars: 100
+    days: 30
+    daily_quota: 0        # 0 = unlimited for premium users
+    max_queued: 20

@@ -28,7 +28,7 @@ func TestInsertAndClaimRoundTripsModeAndQuality(t *testing.T) {
 	ctx := context.Background()
 	id := insert(t, pool, db.NewJob{ChatID: 1, UserID: 1, Mode: db.ModeAudio, Quality: "q720", TelegramMsgID: 9})
 
-	job, err := db.ClaimJob(ctx, pool)
+	job, err := db.ClaimJob(ctx, pool, "test")
 	if err != nil || job == nil {
 		t.Fatalf("claim: %v %v", job, err)
 	}
@@ -38,7 +38,7 @@ func TestInsertAndClaimRoundTripsModeAndQuality(t *testing.T) {
 	if job.Status != db.StatusProcessing || job.StartedAt == nil {
 		t.Fatalf("claimed job not marked processing: %+v", job)
 	}
-	if again, err := db.ClaimJob(ctx, pool); err != nil || again != nil {
+	if again, err := db.ClaimJob(ctx, pool, "test"); err != nil || again != nil {
 		t.Fatalf("queue should be empty, got %v %v", again, err)
 	}
 }
@@ -51,7 +51,7 @@ func TestClaimOrdersByPriorityThenAge(t *testing.T) {
 	urgent := insert(t, pool, db.NewJob{ChatID: 1, UserID: 1, Priority: 10})
 
 	for _, want := range []int64{urgent, first, second} {
-		job, err := db.ClaimJob(ctx, pool)
+		job, err := db.ClaimJob(ctx, pool, "test")
 		if err != nil || job == nil || job.ID != want {
 			t.Fatalf("claimed %v (%v), want %d", job, err, want)
 		}
@@ -73,7 +73,7 @@ func TestConcurrentClaimsNeverDoubleClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				job, err := db.ClaimJob(ctx, pool)
+				job, err := db.ClaimJob(ctx, pool, "test")
 				if err != nil {
 					t.Error(err)
 					return
@@ -124,7 +124,7 @@ func TestQueueStatsAndPositions(t *testing.T) {
 func finishJob(t *testing.T, pool *pgxpool.Pool, done bool, platform string, size int64, daysAgo int) {
 	t.Helper()
 	ctx := context.Background()
-	job, err := db.ClaimJob(ctx, pool)
+	job, err := db.ClaimJob(ctx, pool, "test")
 	if err != nil || job == nil {
 		t.Fatalf("claim: %v %v", job, err)
 	}

@@ -15,6 +15,16 @@ import (
 // MaxRetryAfter caps how long we are willing to wait on a single 429.
 const MaxRetryAfter = 60 * time.Second
 
+// OnRateLimited, if set, is called whenever Telegram answers 429. It is
+// meant for metrics and must be set before the bot starts.
+var OnRateLimited func()
+
+func noteRateLimited(wait time.Duration) {
+	if wait > 0 && OnRateLimited != nil {
+		OnRateLimited()
+	}
+}
+
 // RetryAfter returns the wait Telegram asked for, or 0 if err is not a 429.
 func RetryAfter(err error) time.Duration {
 	var tm *bot.TooManyRequestsError
@@ -45,6 +55,7 @@ func Call(ctx context.Context, attempts int, fn func() error) error {
 	for i := 0; i < attempts; i++ {
 		err = fn()
 		wait := RetryAfter(err)
+		noteRateLimited(wait)
 		if wait == 0 || i == attempts-1 {
 			return err
 		}
@@ -108,6 +119,7 @@ func (t *Throttle) Observe(err error) {
 	defer t.mu.Unlock()
 	t.lastText = ""
 	if wait := RetryAfter(err); wait > 0 {
+		noteRateLimited(wait)
 		t.blockedUntil = t.now().Add(wait)
 	}
 }
