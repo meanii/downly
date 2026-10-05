@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"testing"
+
+	"github.com/meanii/downly/internal/db"
 )
 
 func TestLooksLikeURL(t *testing.T) {
@@ -106,6 +108,77 @@ func TestExtractURLsWithPrefix(t *testing.T) {
 	}
 	if urls[0] != "audio:https://test.com" {
 		t.Errorf("expected audio prefix preserved, got %q", urls[0])
+	}
+}
+
+func TestIsQueueableURL(t *testing.T) {
+	ok := []string{
+		"https://youtube.com/watch?v=abc",
+		"q720:https://youtube.com/watch?v=abc",
+		"audio:https://youtube.com/watch?v=abc",
+		"telegram:https://youtube.com/watch?v=abc",
+	}
+	bad := []string{
+		"--exec=id",
+		"q720:--exec=id",
+		"--exec=id #:https://youtube.com/watch?v=abc",
+		"http://localhost:8080/health",
+		"https://169.254.169.254/latest/meta-data",
+		"file:///etc/passwd",
+		"bogus:https://youtube.com",
+	}
+	for _, u := range ok {
+		if !isQueueableURL(u) {
+			t.Errorf("isQueueableURL(%q) = false, want true", u)
+		}
+	}
+	for _, u := range bad {
+		if isQueueableURL(u) {
+			t.Errorf("isQueueableURL(%q) = true, want false", u)
+		}
+	}
+}
+
+func TestIsPreferenceValue(t *testing.T) {
+	for _, q := range []string{"q360", "q480", "q720", "q1080", "best"} {
+		if !isPreferenceValue(q) {
+			t.Errorf("%q should be accepted", q)
+		}
+	}
+	for _, q := range []string{"", "--exec=id #", "q4k", "audio"} {
+		if isPreferenceValue(q) {
+			t.Errorf("%q should be rejected", q)
+		}
+	}
+}
+
+func TestStripModePrefixTelegram(t *testing.T) {
+	clean, prefix := stripModePrefix("telegram:https://test.com")
+	if clean != "https://test.com" || prefix != "telegram:" {
+		t.Fatalf("got %q %q", clean, prefix)
+	}
+}
+
+func TestJobSpec(t *testing.T) {
+	const u = "https://youtube.com/watch?v=abc"
+	tests := []struct {
+		raw         string
+		wantMode    db.JobMode
+		wantQuality string
+	}{
+		{u, db.ModeVideo, ""},
+		{"audio:" + u, db.ModeAudio, ""},
+		{"q360:" + u, db.ModeVideo, "q360"},
+		{"q480:" + u, db.ModeVideo, "q480"},
+		{"q720:" + u, db.ModeVideo, "q720"},
+		{"q1080:" + u, db.ModeVideo, "q1080"},
+		{"telegram:" + u, db.ModeVideo, "telegram"},
+	}
+	for _, tt := range tests {
+		url, mode, quality := jobSpec(tt.raw)
+		if url != u || mode != tt.wantMode || quality != tt.wantQuality {
+			t.Errorf("jobSpec(%q) = %q, %q, %q", tt.raw, url, mode, quality)
+		}
 	}
 }
 

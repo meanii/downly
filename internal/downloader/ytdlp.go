@@ -4,24 +4,139 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/meanii/downly/internal/safeurl"
 )
 
 type YTDLP struct {
 	Bin           string
 	CookiesFile   string
 	MaxFileSizeMB int64
+	// MaxDownloadMB caps what we fetch before compressing down to
+	// MaxFileSizeMB. Defaults to 4x MaxFileSizeMB.
+	MaxDownloadMB int64
+	FFmpegBin     string
+	FFprobeBin    string
 	Logger        *slog.Logger
+	// HTTPClient is used for direct image/thumbnail fetches. It must refuse
+	// private addresses; defaults to safeurl.NewClient.
+	HTTPClient *http.Client
+	// AlbumHosts lists sites whose posts may hold several photos/videos
+	// (carousels, galleries); all items are fetched and sent as an album.
+	// Defaults to DefaultAlbumHosts.
+	AlbumHosts []string
+}
+
+// DefaultAlbumHosts are sites where one link can be a multi-media post.
+// YouTube is deliberately absent: there a "playlist" is many separate videos.
+var DefaultAlbumHosts = []string{
+	"instagram.com", "x.com", "twitter.com", "threads.net", "threads.com",
+	"tiktok.com", "reddit.com", "facebook.com", "bsky.app",
+}
+
+// MaxAlbumItems caps how many files one album link may produce (Telegram's
+// limit for a single media group).
+const MaxAlbumItems = 10
+
+// isAlbumURL reports whether rawURL's host (or a parent domain) is an album host.
+func (y YTDLP) isAlbumURL(rawURL string) bool {
+	hosts := y.AlbumHosts
+	if hosts == nil {
+		hosts = DefaultAlbumHosts
+	}
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, h := range hosts {
+		h = strings.ToLower(h)
+		if host == h || strings.HasSuffix(host, "."+h) {
+			return true
+		}
+	}
+	return false
+}
+
+// playlistArgs fetches every item of multi-media posts on album hosts and
+// only the linked video elsewhere.
+func (y YTDLP) playlistArgs(rawURL string) []string {
+	if y.isAlbumURL(rawURL) {
+		return []string{"--yes-playlist", "--playlist-items", "1:" + strconv.Itoa(MaxAlbumItems)}
+	}
+	return []string{"--no-playlist"}
+}
+
+const maxThumbnailBytes = 10 * 1024 * 1024
+
+var defaultHTTPClient = safeurl.NewClient(2 * time.Minute)
+
+func (y YTDLP) httpClient() *http.Client {
+	if y.HTTPClient != nil {
+		return y.HTTPClient
+	}
+	return defaultHTTPClient
+}
+
+func (y YTDLP) maxDownloadBytes() int64 {
+	if y.MaxDownloadMB > 0 {
+		return y.MaxDownloadMB * 1024 * 1024
+	}
+	return 4 * y.maxBytes()
+}
+
+// sizeArgs makes yt-dlp abort a download that turns out larger than we can
+// ever compress down, even when metadata did not report a size.
+func (y YTDLP) sizeArgs() []string {
+	return []string{"--max-filesize", strconv.FormatInt(y.maxDownloadBytes(), 10)}
+}
+
+func (y YTDLP) maxBytes() int64 {
+	if y.MaxFileSizeMB <= 0 {
+		return 50 * 1024 * 1024
+	}
+	return y.MaxFileSizeMB * 1024 * 1024
+}
+
+// command builds a yt-dlp invocation. The URL always goes after "--" so a
+// value that starts with "-" can never be parsed as an option.
+func (y YTDLP) command(ctx context.Context, args []string, url string) *exec.Cmd {
+	return exec.CommandContext(ctx, y.Bin, y.buildArgs(args, url)...)
+}
+
+func (y YTDLP) buildArgs(args []string, url string) []string {
+	out := append([]string{}, args...)
+	if y.CookiesFile != "" {
+		if _, err := os.Stat(y.CookiesFile); err == nil {
+			out = append(out, "--cookies", y.CookiesFile)
+		}
+	}
+	return append(out, "--", url)
+}
+
+// validQualities lists every quality value accepted from users.
+var validQualities = map[string]bool{
+	"q360": true, "q480": true, "q720": true, "q1080": true, "telegram": true, "best": true, "qbest": true,
+}
+
+// ValidQuality reports whether q is a known quality setting.
+func ValidQuality(q string) bool {
+	return validQualities[q]
 }
 
 type MediaType int
@@ -31,14 +146,26 @@ const (
 	MediaVideo
 	MediaAudio
 	MediaPhoto
+	// MediaAnimation is a silent looping MP4 sent as a Telegram GIF.
+	MediaAnimation
 )
 
+// Item is one downloaded file.
+type Item struct {
+	FilePath string
+	FileName string
+	Media    MediaType
+}
+
 type Result struct {
-	FilePath      string
-	FileName      string
-	Platform      string
-	Media         MediaType
+	FilePath string
+	FileName string
+	Platform string
+	Media    MediaType
+	// More holds the remaining files of a multi-media post, in order.
+	More          []Item
 	Title         string
+	Performer     string
 	Duration      int
 	ThumbnailPath string
 }
@@ -47,6 +174,8 @@ type mediaInfo struct {
 	Extractor      string  `json:"extractor_key"`
 	ThumbnailURL   string  `json:"thumbnail"`
 	Title          string  `json:"title"`
+	Artist         string  `json:"artist"`
+	Uploader       string  `json:"uploader"`
 	ID             string  `json:"id"`
 	Duration       float64 `json:"duration"`
 	Width          int     `json:"width"`
@@ -54,6 +183,19 @@ type mediaInfo struct {
 	Filesize       int64   `json:"filesize"`
 	FilesizeApprox int64   `json:"filesize_approx"`
 	Platform       string  `json:"-"`
+}
+
+// Items returns every file of the result, the primary one first.
+func (r *Result) Items() []Item {
+	return append([]Item{{FilePath: r.FilePath, FileName: r.FileName, Media: r.Media}}, r.More...)
+}
+
+// performer is who to credit for audio: the artist if known, else the uploader.
+func (m mediaInfo) performer() string {
+	if m.Artist != "" {
+		return m.Artist
+	}
+	return m.Uploader
 }
 
 var progressRE = regexp.MustCompile(`\[download\]\s+([0-9.]+)%`)
@@ -64,6 +206,10 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 		logger = slog.Default()
 	}
 	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "bin", y.Bin)
+
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, err
+	}
 
 	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
@@ -77,7 +223,7 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 		if onProgress != nil {
 			onProgress("Downloading image", 10)
 		}
-		return downloadURL(ctx, jobDir, url, "image", "direct")
+		return y.downloadURL(ctx, jobDir, url, "image", "direct")
 	}
 
 	// Fetch metadata
@@ -91,6 +237,11 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 	result, err := y.downloadVideo(ctx, log, jobDir, url, meta, onProgress)
 	if err == nil {
 		return result, nil
+	}
+	// The media exists but can't be accessed: the fallbacks below would only
+	// replace this clear reason with a vague "no image found".
+	if IsUnavailable(err) {
+		return nil, err
 	}
 
 	// On any yt-dlp failure, retry without a format selector — this handles
@@ -164,6 +315,10 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	}
 	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "quality", quality)
 
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, err
+	}
+
 	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		return nil, err
@@ -179,19 +334,13 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 	args := []string{
 		"--ignore-config",
 		"--newline",
-		"--no-playlist",
 		"-f", qualityFormat(quality),
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	args = append(args, y.playlistArgs(url)...)
+	args = append(args, y.sizeArgs()...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -211,8 +360,8 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	err = cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -226,19 +375,20 @@ func (y YTDLP) DownloadWithQuality(ctx context.Context, workDir string, jobID in
 		onProgress("Finalizing file", 98)
 	}
 
-	result, findErr := findOutputFile(jobDir, meta.Platform)
+	result, findErr := findOutputFiles(jobDir, meta.Platform, y.isAlbumURL(url))
 	if findErr != nil {
 		return nil, findErr
 	}
 
 	// Download thumbnail for better video preview in Telegram
-	result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+	result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 
 	// Compress for Telegram if needed
-	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
-	result.FilePath = compressedPath
+	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
+	y.compressMore(ctx, log, result)
 
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	if result.Media == MediaDocument && isVideoFile(result.FileName) {
@@ -255,6 +405,10 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 	}
 	log := logger.With("component", "downloader", "job_id", jobID, "url", url, "bin", y.Bin, "mode", "audio")
 
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, err
+	}
+
 	jobDir := filepath.Join(workDir, fmt.Sprintf("job-%d", jobID))
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		return nil, err
@@ -270,16 +424,14 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 		"-x",
 		"--audio-format", "mp3",
 		"--audio-quality", "0",
+		// Title/artist tags and the cover image inside the MP3, which
+		// Telegram shows in its player.
+		"--embed-metadata",
+		"--embed-thumbnail",
+		"--convert-thumbnails", "jpg",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -299,8 +451,8 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	err = cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -318,38 +470,70 @@ func (y YTDLP) DownloadAudio(ctx context.Context, workDir string, jobID int64, u
 	}
 	result.Media = MediaAudio
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	return result, nil
 }
 
-// checkSize returns an error when the known/approximate file size from metadata
-// already exceeds MaxFileSizeMB, so we don't waste bandwidth downloading it.
+// checkSize returns an error when the known/approximate size from metadata
+// is beyond what we are willing to download and compress, so we don't waste
+// bandwidth on it.
 func (y YTDLP) checkSize(meta mediaInfo) error {
 	if y.MaxFileSizeMB <= 0 {
 		return nil
 	}
-	limit := y.MaxFileSizeMB * 1024 * 1024
+	limit := y.maxDownloadBytes()
 	size := meta.Filesize
 	if size == 0 {
 		size = meta.FilesizeApprox
 	}
 	if size > 0 && size > limit {
-		return fmt.Errorf("video is ~%.0fMB, exceeds the %dMB limit — try a lower quality (720p, 480p)", float64(size)/1024/1024, y.MaxFileSizeMB)
+		return fmt.Errorf("%w: video is ~%.0fMB, too large to fit in %dMB — try a lower quality (720p, 480p)", ErrTooLarge, float64(size)/1024/1024, y.MaxFileSizeMB)
 	}
 	return nil
 }
 
-func (y YTDLP) fetchMetadata(ctx context.Context, log *slog.Logger, url string) mediaInfo {
-	args := []string{"--ignore-config", "--dump-single-json", "--no-playlist", "--no-download"}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
+// unavailableMarkers are yt-dlp messages meaning the media exists but cannot
+// be fetched, so neither retries nor format/image fallbacks will help.
+var unavailableMarkers = []string{
+	"private video",
+	"video unavailable",
+	"this video is unavailable",
+	"this video has been removed",
+	"members-only",
+	"join this channel",
+	"sign in to confirm your age",
+	"age-restricted",
+	"copyright",
+	"file is larger than max-filesize",
+	"requested content is not available",
+}
+
+// IsUnavailable reports whether err says the media can't be accessed
+// (private, removed, members-only, age-gated, too large).
+func IsUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrTooLarge) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range unavailableMarkers {
+		if strings.Contains(msg, m) {
+			return true
 		}
 	}
-	args = append(args, url)
+	return false
+}
 
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+// ErrTooLarge marks downloads that can never fit; retrying will not help.
+var ErrTooLarge = errors.New("file too large")
+
+func (y YTDLP) fetchMetadata(ctx context.Context, log *slog.Logger, url string) mediaInfo {
+	args := []string{"--ignore-config", "--dump-single-json", "--no-playlist", "--no-download"}
+	cmd := y.command(ctx, args, url)
 	out, err := cmd.Output()
 	meta := mediaInfo{Platform: "unknown"}
 	if err == nil {
@@ -368,19 +552,13 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	args := []string{
 		"--ignore-config",
 		"--newline",
-		"--no-playlist",
 		"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
 		"--merge-output-format", "mp4",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	args = append(args, y.playlistArgs(url)...)
+	args = append(args, y.sizeArgs()...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -400,8 +578,8 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), onProgress) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	err = cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -417,19 +595,20 @@ func (y YTDLP) downloadVideo(ctx context.Context, log *slog.Logger, jobDir, url 
 	}
 	log.Info("yt-dlp finished")
 
-	result, findErr := findOutputFile(jobDir, meta.Platform)
+	result, findErr := findOutputFiles(jobDir, meta.Platform, y.isAlbumURL(url))
 	if findErr != nil {
 		return nil, findErr
 	}
 
 	// Download thumbnail for better video preview in Telegram
-	result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+	result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 
 	// Compress for Telegram if needed
-	compressedPath, _ := compressVideo(ctx, log, result.FilePath)
-	result.FilePath = compressedPath
+	result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
+	y.compressMore(ctx, log, result)
 
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	if result.Media == MediaDocument && isVideoFile(result.FileName) {
@@ -445,17 +624,11 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 	args := []string{
 		"--ignore-config",
 		"--newline",
-		"--no-playlist",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	args = append(args, y.playlistArgs(url)...)
+	args = append(args, y.sizeArgs()...)
+	cmd := y.command(ctx, args, url)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -474,8 +647,8 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 
 	stdoutCh := make(chan []string, 1)
 	stderrCh := make(chan []string, 1)
-	go func() { stdoutCh <- readPipe(bufio.NewScanner(stdout), onProgress) }()
-	go func() { stderrCh <- readPipe(bufio.NewScanner(stderr), nil) }()
+	go func() { stdoutCh <- readPipe(stdout, onProgress) }()
+	go func() { stderrCh <- readPipe(stderr, nil) }()
 
 	cmdErr := cmd.Wait()
 	stdoutLines := <-stdoutCh
@@ -489,20 +662,21 @@ func (y YTDLP) downloadAny(ctx context.Context, log *slog.Logger, jobDir, url st
 		onProgress("Finalizing", 98)
 	}
 
-	result, findErr := findOutputFile(jobDir, meta.Platform)
+	result, findErr := findOutputFiles(jobDir, meta.Platform, y.isAlbumURL(url))
 	if findErr != nil {
 		return nil, findErr
 	}
 
 	// Download thumbnail for video files
 	if isVideoFile(result.FileName) {
-		result.ThumbnailPath = downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
+		result.ThumbnailPath = y.downloadThumbnail(ctx, jobDir, meta.ThumbnailURL)
 		// Compress for Telegram if needed
-		compressedPath, _ := compressVideo(ctx, log, result.FilePath)
-		result.FilePath = compressedPath
+		result.FilePath = y.compressToFit(ctx, log, result.FilePath, meta.Duration)
 	}
+	y.compressMore(ctx, log, result)
 
 	result.Title = meta.Title
+	result.Performer = meta.performer()
 	result.Duration = int(meta.Duration)
 	result.FileName = friendlyFileName(meta.Title, meta.ID, result.FileName)
 	return result, nil
@@ -519,14 +693,7 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		"--convert-thumbnails", "jpg",
 		"-o", outputTemplate,
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		log.Info("thumbnail download succeeded")
@@ -537,6 +704,7 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		if findErr == nil {
 			result.Media = MediaPhoto
 			result.Title = meta.Title
+			result.Performer = meta.performer()
 			return result, nil
 		}
 		log.Warn("thumbnail file not found after download", "error", findErr)
@@ -550,7 +718,7 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		if onProgress != nil {
 			onProgress("Downloading image", 50)
 		}
-		return downloadURL(ctx, jobDir, meta.ThumbnailURL, meta.ID, meta.Platform)
+		return y.downloadURL(ctx, jobDir, meta.ThumbnailURL, meta.ID, meta.Platform)
 	}
 
 	// Last resort: fetch the URL directly if it looks like an image.
@@ -559,18 +727,21 @@ func (y YTDLP) downloadImage(ctx context.Context, log *slog.Logger, jobDir, url 
 		if onProgress != nil {
 			onProgress("Downloading image directly", 50)
 		}
-		return downloadURL(ctx, jobDir, url, "image", "direct")
+		return y.downloadURL(ctx, jobDir, url, "image", "direct")
 	}
 
 	return nil, fmt.Errorf("no video or image could be extracted from this URL")
 }
 
-func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result, error) {
+func (y YTDLP) downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result, error) {
+	if _, err := safeurl.Validate(url); err != nil {
+		return nil, fmt.Errorf("image download refused: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := y.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("image download failed: %w", err)
 	}
@@ -578,6 +749,9 @@ func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("image download returned status %d", resp.StatusCode)
+	}
+	if resp.ContentLength > y.maxBytes() {
+		return nil, fmt.Errorf("image download: %w", safeurl.ErrTooLarge)
 	}
 
 	ext := "jpg"
@@ -591,15 +765,16 @@ func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result
 		ext = "gif"
 	}
 
-	fileName := fmt.Sprintf("%s.%s", id, ext)
+	fileName := fmt.Sprintf("%s.%s", safeFileStem(id), ext)
 	filePath := filepath.Join(jobDir, fileName)
 	f, err := os.Create(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return nil, err
+	if _, err := safeurl.CopyLimited(f, resp.Body, y.maxBytes()); err != nil {
+		_ = os.Remove(filePath)
+		return nil, fmt.Errorf("image download: %w", err)
 	}
 
 	return &Result{
@@ -608,6 +783,22 @@ func downloadURL(ctx context.Context, jobDir, url, id, platform string) (*Result
 		Platform: platform,
 		Media:    MediaPhoto,
 	}, nil
+}
+
+var unsafeStemRE = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// safeFileStem turns an extractor-supplied ID into something that cannot
+// escape the job directory.
+func safeFileStem(id string) string {
+	s := unsafeStemRE.ReplaceAllString(id, "_")
+	s = strings.Trim(s, ".")
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	if s == "" {
+		return "file"
+	}
+	return s
 }
 
 // friendlyFileName builds a human-readable filename from title + id metadata,
@@ -636,22 +827,37 @@ var skipExts = map[string]bool{
 }
 
 func findOutputFile(jobDir, platform string) (*Result, error) {
-	var found string
+	return findOutputFiles(jobDir, platform, false)
+}
+
+// findOutputFiles returns the downloaded media in jobDir. With album set,
+// every file (in download order, at most MaxAlbumItems) is returned;
+// otherwise only the first, so stray files never turn a video into an album.
+func findOutputFiles(jobDir, platform string, album bool) (*Result, error) {
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	var found []candidate
 	err := filepath.WalkDir(jobDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || found != "" {
+		if err != nil || d.IsDir() {
 			return nil
 		}
 		name := d.Name()
-		if skipExts[strings.ToLower(filepath.Ext(name))] {
+		if skipExts[strings.ToLower(filepath.Ext(name))] || strings.HasPrefix(name, "thumbnail.") {
 			return nil
 		}
-		found = path
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		found = append(found, candidate{path, info.ModTime()})
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if found == "" {
+	if len(found) == 0 {
 		// Log directory contents to help diagnose why yt-dlp wrote nothing.
 		if entries, readErr := os.ReadDir(jobDir); readErr == nil {
 			names := make([]string, 0, len(entries))
@@ -664,13 +870,40 @@ func findOutputFile(jobDir, platform string) (*Result, error) {
 		}
 		return nil, fmt.Errorf("no output file found in %s", jobDir)
 	}
-	name := filepath.Base(found)
-	return &Result{
-		FilePath: found,
+	// yt-dlp writes album items in order; break ties by name.
+	sort.Slice(found, func(a, b int) bool {
+		if !found[a].mod.Equal(found[b].mod) {
+			return found[a].mod.Before(found[b].mod)
+		}
+		return found[a].path < found[b].path
+	})
+	if !album {
+		found = found[:1]
+	} else if len(found) > MaxAlbumItems {
+		found = found[:MaxAlbumItems]
+	}
+	name := filepath.Base(found[0].path)
+	res := &Result{
+		FilePath: found[0].path,
 		FileName: name,
 		Platform: platform,
 		Media:    detectMediaType(name),
-	}, nil
+	}
+	for _, c := range found[1:] {
+		n := filepath.Base(c.path)
+		res.More = append(res.More, Item{FilePath: c.path, FileName: n, Media: detectMediaType(n)})
+	}
+	return res, nil
+}
+
+// compressMore shrinks oversized videos among an album's extra items.
+func (y YTDLP) compressMore(ctx context.Context, log *slog.Logger, res *Result) {
+	for i := range res.More {
+		if res.More[i].Media == MediaVideo {
+			res.More[i].FilePath = y.compressToFit(ctx, log, res.More[i].FilePath, 0)
+			res.More[i].FileName = filepath.Base(res.More[i].FilePath)
+		}
+	}
 }
 
 func detectMediaType(name string) MediaType {
@@ -727,6 +960,8 @@ func isImageURL(rawURL string) bool {
 
 // PlaylistEntry represents a single video in a playlist.
 type PlaylistEntry struct {
+	// ID is the extractor's stable ID for the entry (falls back to the URL).
+	ID    string
 	Title string
 	URL   string
 }
@@ -742,20 +977,17 @@ type playlistJSON struct {
 
 // FetchPlaylist fetches playlist metadata and returns individual entry URLs.
 func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]PlaylistEntry, string, error) {
+	if err := safeurl.CheckHost(ctx, url); err != nil {
+		return nil, "", err
+	}
 	args := []string{
+		"--ignore-config",
 		"--dump-single-json",
 		"--flat-playlist",
 		"--no-download",
 		"--playlist-end", strconv.Itoa(maxItems),
 	}
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			args = append(args, "--cookies", y.CookiesFile)
-		}
-	}
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, y.Bin, args...)
+	cmd := y.command(ctx, args, url)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, "", fmt.Errorf("playlist fetch failed: %w", err)
@@ -779,14 +1011,21 @@ func (y YTDLP) FetchPlaylist(ctx context.Context, url string, maxItems int) ([]P
 		if title == "" {
 			title = "(untitled)"
 		}
-		entries = append(entries, PlaylistEntry{Title: title, URL: entryURL})
+		id := e.ID
+		if id == "" {
+			id = entryURL
+		}
+		entries = append(entries, PlaylistEntry{ID: id, Title: title, URL: entryURL})
 	}
 	return entries, pl.Title, nil
 }
 
 // downloadThumbnail fetches and stores the thumbnail for a video in the job directory.
-func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) string {
+func (y YTDLP) downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) string {
 	if thumbURL == "" {
+		return ""
+	}
+	if _, err := safeurl.Validate(thumbURL); err != nil {
 		return ""
 	}
 
@@ -794,7 +1033,7 @@ func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) stri
 	if err != nil {
 		return ""
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := y.httpClient().Do(req)
 	if err != nil {
 		return ""
 	}
@@ -818,58 +1057,23 @@ func downloadThumbnail(ctx context.Context, jobDir string, thumbURL string) stri
 		return ""
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := safeurl.CopyLimited(f, resp.Body, maxThumbnailBytes); err != nil {
+		_ = os.Remove(fileName)
 		return ""
 	}
 	return fileName
 }
 
-func compressVideo(ctx context.Context, log *slog.Logger, filePath string) (string, error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return filePath, err
-	}
-	sizeMB := float64(info.Size()) / 1024 / 1024
-	if sizeMB <= 150 {
-		return filePath, nil
-	}
+// maxKeptLines bounds how much yt-dlp output is kept for error messages.
+const maxKeptLines = 40
 
-	log.Info("compressing video for telegram", "original_size_mb", sizeMB, "file", filePath)
-	outputPath := strings.TrimSuffix(filePath, ".mp4") + "_compressed.mp4"
-
-	args := []string{
-		"-i", filePath,
-		"-vf", "scale=1280:-2",
-		"-c:v", "libx264",
-		"-b:v", "1500k",
-		"-c:a", "aac",
-		"-b:a", "128k",
-		"-preset", "fast",
-		"-y",
-		outputPath,
-	}
-
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Error("ffmpeg compression failed", "error", err, "output", string(out))
-		return filePath, nil
-	}
-
-	compInfo, _ := os.Stat(outputPath)
-	if compInfo != nil {
-		compSizeMB := float64(compInfo.Size()) / 1024 / 1024
-		log.Info("compression complete", "original_mb", sizeMB, "compressed_mb", compSizeMB)
-		if err := os.Remove(filePath); err != nil {
-			log.Warn("failed to remove original after compression", "error", err)
-		}
-		return outputPath, nil
-	}
-
-	return filePath, nil
-}
-
-func readPipe(scanner *bufio.Scanner, onProgress func(text string, percent int)) []string {
+// readPipe drains r line by line, reporting progress and returning the last
+// maxKeptLines lines. It always reads r to EOF so the child never blocks on a
+// full pipe, even if a line is too long to scan.
+func readPipe(r io.Reader, onProgress func(text string, percent int)) []string {
+	defer func() { _, _ = io.Copy(io.Discard, r) }()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	var lines []string
 	// phase tracks how many download streams have started (for video+audio 2-stream downloads).
 	// Phase 1 maps to 5–48 %, phase 2 maps to 48–95 %, single-stream maps to 5–95 %.
@@ -877,7 +1081,12 @@ func readPipe(scanner *bufio.Scanner, onProgress func(text string, percent int))
 	lastMapped := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		lines = append(lines, line)
+		if !progressRE.MatchString(line) {
+			lines = append(lines, line)
+			if len(lines) > maxKeptLines {
+				lines = lines[len(lines)-maxKeptLines:]
+			}
+		}
 
 		if strings.Contains(line, "[download] Destination:") {
 			phase++

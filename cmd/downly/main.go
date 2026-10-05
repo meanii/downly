@@ -16,14 +16,17 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	cfgpkg "github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/cleanup"
-	"github.com/meanii/downly/internal/db"
+	cfgpkg "github.com/meanii/downly/internal/config"
+	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/health"
 	"github.com/meanii/downly/internal/logging"
 	mig "github.com/meanii/downly/internal/migrate"
 	"github.com/meanii/downly/internal/reaper"
 	"github.com/meanii/downly/internal/statsreport"
+	"github.com/meanii/downly/internal/subscriptions"
 	tgbot "github.com/meanii/downly/internal/telegram"
+	"github.com/meanii/downly/internal/tgutil"
 	"github.com/meanii/downly/internal/updater"
 	"github.com/meanii/downly/internal/worker"
 )
@@ -58,14 +61,6 @@ func main() {
 		logger.Error("run migrations failed", "error", err)
 		os.Exit(1)
 	}
-	if err := db.EnsureSchema(ctx, pool); err != nil {
-		logger.Error("ensure schema compatibility failed", "error", err)
-		os.Exit(1)
-	}
-	if err := db.EnsurePreferencesTable(ctx, pool); err != nil {
-		logger.Error("ensure preferences table failed", "error", err)
-		os.Exit(1)
-	}
 	logger.Info("schema ready")
 
 	if err := os.MkdirAll(cfg.Downly.Worker.WorkDir, 0o755); err != nil {
@@ -73,8 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// No overall client Timeout: it would also cap file uploads, which can
+	// legitimately take minutes. Calls are bounded by their contexts instead,
+	// and ResponseHeaderTimeout catches a stalled server. It must exceed the
+	// long-poll duration below.
 	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
@@ -87,11 +85,19 @@ func main() {
 			TLSHandshakeTimeout:   15 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			MaxIdleConnsPerHost:   10,
-			ResponseHeaderTimeout: 70 * time.Second,
+			ResponseHeaderTimeout: 90 * time.Second,
 		},
 	}
 
-	b, err := bot.New(cfg.Downly.Telegram.BotToken, bot.WithHTTPClient(30*time.Second, httpClient))
+	botOpts := []bot.Option{
+		bot.WithHTTPClient(60*time.Second, httpClient),
+		bot.WithMiddlewares(tgbot.UserTracker(pool, logger)),
+	}
+	if u := cfg.Downly.Telegram.APIURL; u != "" {
+		botOpts = append(botOpts, bot.WithServerURL(u))
+		logger.Info("using custom Bot API server", "url", u)
+	}
+	b, err := bot.New(cfg.Downly.Telegram.BotToken, botOpts...)
 	if err != nil {
 		logger.Error("init telegram bot failed", "error", err)
 		os.Exit(1)
@@ -100,29 +106,84 @@ func main() {
 
 	controller := worker.NewController()
 	tgbot.RegisterHandlers(logger, cfg, controller, b, pool)
+	go tgbot.SetCommandMenus(ctx, b, logger.With("component", "telegram"), cfg.Downly.Premium.Enabled)
+
+	// Anything in the work dir older than one job timeout is from a crash.
+	worker.SweepWorkDir(logger, cfg.Downly.Worker.WorkDir, time.Duration(cfg.Downly.Worker.JobTimeoutMinutes)*time.Minute)
 
 	// Background services
-	go cleanup.Loop(ctx, logger, pool, cfg.Downly.Cleanup.Enabled, cfg.Downly.Cleanup.RetentionHours)
+	go cleanup.Loop(ctx, logger, pool, cfg.Downly.Cleanup.Enabled, cfg.Downly.Cleanup.RetentionHours,
+		time.Duration(cfg.Downly.Cache.RetentionDays)*24*time.Hour)
 	go updater.Loop(ctx, logger, cfg.Downly.Services.YTDLP.Bin, cfg.Downly.Services.YTDLP.AutoUpdateHours)
-	go reaper.Loop(ctx, logger, pool, cfg.Downly.Worker.StuckJobMinutes)
+	go reaper.Loop(ctx, logger, pool, cfg.Downly.Worker.StuckJobMinutes, cfg.Downly.Limits.MaxRetries)
 	go statsreport.Loop(ctx, logger, pool, b, cfg.Downly.Admin.StatsChannelID, cfg.Downly.Admin.StatsIntervalH)
 
-	// Health check endpoint
-	go startHealthServer(logger, pool, cfg.Downly.Worker.HealthPort)
+	// Health and metrics
+	reg := health.New()
+	tgutil.OnRateLimited = func() { reg.Inc("downly_telegram_rate_limited_total") }
+	go reg.ProbeTelegram(ctx, logger.With("component", "health"), time.Minute, func(ctx context.Context) error {
+		_, err := b.GetMe(ctx)
+		return err
+	})
+	healthSrv := startHealthServer(logger, reg, pool, cfg.Downly.Worker.HealthPort, health.Thresholds{
+		// A worker pings at least every heartbeat (30s) or poll interval.
+		WorkerStale:   5*time.Minute + time.Duration(cfg.Downly.Worker.PollIntervalSec)*time.Second,
+		TelegramStale: 5 * time.Minute,
+	})
 
-	// Start workers
+	// Workers. Shutdown happens in two phases: claimCtx stops taking new
+	// jobs, workCtx interrupts (and requeues) jobs still running after the
+	// grace period.
+	claimCtx, stopClaiming := context.WithCancel(ctx)
+	workCtx, stopWork := context.WithCancel(context.Background())
+	defer stopWork()
+
+	waker := worker.NewWaker()
+	go worker.Listen(claimCtx, logger, pool, waker)
+
+	dl := downloader.YTDLP{
+		Bin:           cfg.Downly.Services.YTDLP.Bin,
+		CookiesFile:   cfg.Downly.Services.YTDLP.CookiesFile,
+		MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
+		MaxDownloadMB: cfg.Downly.Worker.MaxDownloadMB,
+		AlbumHosts:    cfg.Downly.Services.YTDLP.AlbumHosts,
+		Logger:        logger,
+	}
+	if !cfg.Downly.Subscriptions.Disabled {
+		poller := &subscriptions.Poller{
+			Pool:     pool,
+			Fetcher:  dl,
+			Interval: time.Duration(cfg.Downly.Subscriptions.IntervalMinutes) * time.Minute,
+			Log:      logger,
+		}
+		go poller.Run(claimCtx)
+	}
+
+	host, _ := os.Hostname()
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Downly.Worker.NumberOfWorkers; i++ {
-		workerID := i + 1
+		w := &worker.Worker{
+			ID:         fmt.Sprintf("%s-%d-%d", host, os.Getpid(), i+1),
+			Cfg:        cfg,
+			Pool:       pool,
+			DL:         dl,
+			Msg:        worker.TelegramMessenger{Bot: b},
+			Controller: controller,
+			Waker:      waker,
+			Log:        logger,
+			Health:     reg,
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			worker.Loop(ctx, logger, controller, workerID, cfg, pool, b)
+			w.Run(claimCtx, workCtx)
 		}()
 	}
 
-	// Start telegram polling in a goroutine so we can handle shutdown
-	go b.Start(ctx)
+	// Telegram polling stops first on shutdown so no new jobs arrive.
+	botCtx, stopBot := context.WithCancel(ctx)
+	defer stopBot()
+	go b.Start(botCtx)
 	logger.Info("downly is running", "workers", cfg.Downly.Worker.NumberOfWorkers)
 
 	// Wait for shutdown signal
@@ -131,45 +192,55 @@ func main() {
 	sig := <-sigCh
 	logger.Info("received shutdown signal", "signal", sig.String())
 
-	// Cancel context to stop all workers and background services
-	cancel()
-	logger.Info("waiting for workers to finish current jobs...")
-
-	// Give workers a deadline to finish
+	stopBot()
+	stopClaiming()
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
+	grace := time.Duration(cfg.Downly.Worker.ShutdownGraceSec) * time.Second
+	logger.Info("waiting for running jobs to finish", "grace", grace.String())
 	select {
 	case <-done:
 		logger.Info("all workers stopped cleanly")
-	case <-time.After(2 * time.Minute):
-		logger.Warn("shutdown deadline reached, forcing exit")
+	case <-time.After(grace):
+		logger.Warn("grace period over, interrupting and requeueing running jobs")
+		stopWork()
+		select {
+		case <-done:
+			logger.Info("workers stopped after requeueing")
+		case <-time.After(30 * time.Second):
+			logger.Warn("workers did not stop in time; the reaper will recover their jobs")
+		}
+	case sig := <-sigCh:
+		logger.Warn("second signal, interrupting running jobs", "signal", sig.String())
+		stopWork()
+		<-done
 	}
 
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = healthSrv.Shutdown(shutdownCtx)
+	cancelShutdown()
+	cancel()
 	logger.Info("downly stopped")
 }
 
-func startHealthServer(logger *slog.Logger, pool *pgxpool.Pool, port int) {
+func startHealthServer(logger *slog.Logger, reg *health.Registry, pool *pgxpool.Pool, port int, th health.Thresholds) *http.Server {
 	if port <= 0 {
 		port = 8080
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if err := pool.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprintf(w, "db: %v", err)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
-
-	addr := fmt.Sprintf(":%d", port)
-	logger.Info("health endpoint started", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		logger.Error("health server failed", "error", err)
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           reg.Handler(pool, th),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
+	go func() {
+		logger.Info("health endpoint started", "addr", srv.Addr, "paths", "/health /metrics")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("health server failed", "error", err)
+		}
+	}()
+	return srv
 }
