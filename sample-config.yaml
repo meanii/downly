@@ -40,3 +40,20 @@ downly:
       bin: "yt-dlp"
       cookies_file: "/app/cookies/instagram.txt"
       auto_update_hours: 6
+      # album_hosts: ["instagram.com", "x.com"]  # override the album site list
+
+  cache:
+    disabled: false
+    retention_days: 60
+
+  subscriptions:
+    disabled: false
+    interval_minutes: 60
+    max_per_chat: 5
+
+  premium:
+    enabled: false        # sell Premium for Telegram Stars
+    price_stars: 100
+    days: 30
+    daily_quota: 0        # 0 = unlimited for premium users
+    max_queued: 20

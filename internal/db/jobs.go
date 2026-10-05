@@ -27,6 +27,8 @@ type JobMode string
 const (
 	ModeVideo JobMode = "video"
 	ModeAudio JobMode = "audio"
+	// ModeGIF converts (a section of) a video into a Telegram GIF.
+	ModeGIF JobMode = "gif"
 )
 
 type Job struct {
@@ -50,9 +52,13 @@ type Job struct {
 	CacheKey        string
 	Cached          bool
 	InlineMessageID string
-	CreatedAt       time.Time
-	StartedAt       *time.Time
-	FinishedAt      *time.Time
+	ReplyTo         int64
+	// ClipStart/ClipEnd select a section in seconds (both 0 = whole video).
+	ClipStart  int
+	ClipEnd    int
+	CreatedAt  time.Time
+	StartedAt  *time.Time
+	FinishedAt *time.Time
 }
 
 // NewJob holds what is needed to enqueue a download.
@@ -68,6 +74,10 @@ type NewJob struct {
 	CacheKey string
 	// InlineMessageID is set for inline-mode requests.
 	InlineMessageID string
+	// ReplyTo is the message the job answers (0 = none).
+	ReplyTo int64
+	// ClipStart/ClipEnd select a section in seconds (both 0 = whole video).
+	ClipStart, ClipEnd int
 }
 
 type QueueStats struct {
@@ -79,14 +89,14 @@ type QueueStats struct {
 // jobColumns and scanJob keep every full-row query in sync.
 const jobColumns = `id, chat_id, user_id, url, mode, quality, platform, status, priority, output_path, output_name,
 	error_message, retry_count, telegram_message_id, progress_text, progress_percent, cache_key, cached,
-	inline_message_id, created_at, started_at, finished_at`
+	inline_message_id, reply_to_message_id, clip_start, clip_end, created_at, started_at, finished_at`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var job Job
 	err := row.Scan(&job.ID, &job.ChatID, &job.UserID, &job.URL, &job.Mode, &job.Quality, &job.Platform, &job.Status,
 		&job.Priority, &job.OutputPath, &job.OutputName, &job.ErrorMessage, &job.RetryCount, &job.TelegramMsgID,
 		&job.ProgressText, &job.ProgressPercent, &job.CacheKey, &job.Cached, &job.InlineMessageID,
-		&job.CreatedAt, &job.StartedAt, &job.FinishedAt)
+		&job.ReplyTo, &job.ClipStart, &job.ClipEnd, &job.CreatedAt, &job.StartedAt, &job.FinishedAt)
 	return job, err
 }
 
@@ -114,10 +124,10 @@ func InsertJob(ctx context.Context, pool *pgxpool.Pool, j NewJob) (int64, error)
 	var jobID int64
 	err := pool.QueryRow(ctx, `
 		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
-			progress_text, progress_percent, cache_key, inline_message_id)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10)
+			progress_text, progress_percent, cache_key, inline_message_id, reply_to_message_id, clip_start, clip_end)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10, $11, $12, $13)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID).Scan(&jobID)
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID, j.ReplyTo, j.ClipStart, j.ClipEnd).Scan(&jobID)
 	return jobID, err
 }
 
@@ -434,6 +444,12 @@ func PruneJobs(ctx context.Context, pool *pgxpool.Pool, retentionHours int) (int
 func ModeLabel(job Job) string {
 	if job.Mode == ModeAudio {
 		return "audio"
+	}
+	if job.Mode == ModeGIF {
+		return "gif"
+	}
+	if job.ClipEnd > job.ClipStart {
+		return fmt.Sprintf("clip %d-%ds", job.ClipStart, job.ClipEnd)
 	}
 	switch job.Quality {
 	case "q360":
