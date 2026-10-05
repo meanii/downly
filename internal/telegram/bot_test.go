@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"testing"
+
+	"github.com/meanii/downly/internal/db"
 )
 
 func TestLooksLikeURL(t *testing.T) {
@@ -154,6 +156,29 @@ func TestStripModePrefixTelegram(t *testing.T) {
 	clean, prefix := stripModePrefix("telegram:https://test.com")
 	if clean != "https://test.com" || prefix != "telegram:" {
 		t.Fatalf("got %q %q", clean, prefix)
+	}
+}
+
+func TestJobSpec(t *testing.T) {
+	const u = "https://youtube.com/watch?v=abc"
+	tests := []struct {
+		raw         string
+		wantMode    db.JobMode
+		wantQuality string
+	}{
+		{u, db.ModeVideo, ""},
+		{"audio:" + u, db.ModeAudio, ""},
+		{"q360:" + u, db.ModeVideo, "q360"},
+		{"q480:" + u, db.ModeVideo, "q480"},
+		{"q720:" + u, db.ModeVideo, "q720"},
+		{"q1080:" + u, db.ModeVideo, "q1080"},
+		{"telegram:" + u, db.ModeVideo, "telegram"},
+	}
+	for _, tt := range tests {
+		url, mode, quality := jobSpec(tt.raw)
+		if url != u || mode != tt.wantMode || quality != tt.wantQuality {
+			t.Errorf("jobSpec(%q) = %q, %q, %q", tt.raw, url, mode, quality)
+		}
 	}
 }
 
