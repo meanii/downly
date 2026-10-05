@@ -37,14 +37,14 @@ downly:
 	if cfg.Downly.Worker.WorkDir != "./tmp" {
 		t.Errorf("expected default work dir './tmp', got %q", cfg.Downly.Worker.WorkDir)
 	}
+	if cfg.Downly.Worker.JobTimeoutMinutes != 30 || cfg.Downly.Worker.ShutdownGraceSec != 60 || cfg.Downly.Worker.StuckJobMinutes != 5 {
+		t.Errorf("unexpected lifecycle defaults: %+v", cfg.Downly.Worker)
+	}
 	if cfg.Downly.Worker.MaxDownloadMB != 4*cfg.Downly.Worker.MaxFileSizeMB {
 		t.Errorf("expected default max download 4x upload limit, got %d", cfg.Downly.Worker.MaxDownloadMB)
 	}
 	if cfg.Downly.Worker.MaxFileSizeMB != 45 {
 		t.Errorf("expected default max file size 45, got %d", cfg.Downly.Worker.MaxFileSizeMB)
-	}
-	if cfg.Downly.Worker.StuckJobMinutes != 15 {
-		t.Errorf("expected default stuck job minutes 15, got %d", cfg.Downly.Worker.StuckJobMinutes)
 	}
 	if cfg.Downly.Worker.HealthPort != 8080 {
 		t.Errorf("expected default health port 8080, got %d", cfg.Downly.Worker.HealthPort)

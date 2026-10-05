@@ -6,17 +6,28 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    # Secrets can come from the environment instead of config.yaml.
+    # Unset variables are not passed through.
+    environment:
+      - DOWNLY_BOT_TOKEN
+      - DOWNLY_POSTGRES_URL
+      - DOWNLY_ADMIN_IDS
     volumes:
+      # The container runs as uid 10001: config.yaml must be readable by it
+      # (e.g. chmod 644), or provide secrets via the variables above.
       - ./config.yaml:/app/config.yaml:ro
-      - ./downloads:/app/downloads
-      - ./tmp:/app/tmp
-      - ./cookies:/app/cookies
+      - ./cookies:/app/cookies:ro
+      - downly-tmp:/app/tmp
     restart: unless-stopped
+    # Must exceed worker.shutdown_grace_seconds so running jobs can finish
+    # or be requeued before Docker sends SIGKILL.
+    stop_grace_period: 90s
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
@@ -26,7 +37,8 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: downly
-      POSTGRES_PASSWORD: downly
+      # Override in a .env file next to this compose file.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-downly}
       POSTGRES_DB: downly
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
@@ -37,4 +49,5 @@ services:
       timeout: 5s
       retries: 10
 
-volumes: {}
+volumes:
+  downly-tmp: {}
