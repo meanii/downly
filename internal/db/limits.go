@@ -92,10 +92,10 @@ func EnqueueJob(ctx context.Context, pool *pgxpool.Pool, j NewJob, lim EnqueueLi
 	var id int64
 	if err := tx.QueryRow(ctx, `
 		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
-			progress_text, progress_percent, cache_key, inline_message_id, reply_to_message_id)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10, $11)
+			progress_text, progress_percent, cache_key, inline_message_id, reply_to_message_id, clip_start, clip_end)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10, $11, $12, $13)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID, j.ReplyTo).Scan(&id); err != nil {
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID, j.ReplyTo, j.ClipStart, j.ClipEnd).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit(ctx)

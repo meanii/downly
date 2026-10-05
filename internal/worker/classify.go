@@ -52,7 +52,7 @@ func isPermanent(err error) bool {
 	if err == nil {
 		return false
 	}
-	if downloader.IsUnavailable(err) || errors.Is(err, safeurl.ErrInvalidURL) ||
+	if downloader.IsUnavailable(err) || errors.Is(err, downloader.ErrBadRange) || errors.Is(err, safeurl.ErrInvalidURL) ||
 		errors.Is(err, safeurl.ErrBlockedHost) || errors.Is(err, safeurl.ErrTooLarge) {
 		return true
 	}

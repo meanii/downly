@@ -10,27 +10,32 @@ Built in Go with Postgres-backed job queue and yt-dlp as the download backend.
 cmd/downly/          entrypoint
 internal/
   config/            YAML config loader (+ env overrides)
-  db/                Postgres queries (jobs, users, stats, limits)
-  downloader/        yt-dlp wrapper and ffmpeg compression
+  db/                Postgres queries (jobs, users, stats, cache, subscriptions, payments)
+  downloader/        yt-dlp wrapper, clips/GIFs, ffmpeg compression
   telegram/          Telegram bot handlers
-  worker/            job processing, heartbeats, retries
+  worker/            job processing, heartbeats, retries, albums
+  subscriptions/     /follow poller
+  media/             shared media types and cache keys
+  i18n/              translations (en, ru, hi, fa)
   reaper/            recovers jobs from dead workers
-  cleanup/           prunes old jobs into daily stats
+  cleanup/           prunes old jobs (into daily stats) and stale cache entries
   updater/           yt-dlp auto-updater
   migrate/           embedded SQL migrations
   health/            /health and /metrics endpoints
   safeurl/           URL validation and SSRF-safe HTTP client
   tgutil/            Telegram rate-limit helpers
+  tgtest/            fake Bot API server for tests
+  e2e/               end-to-end tests
   logging/           structured logger setup
 ```
 
 ## How it works
 
-1. User sends a URL to the Telegram bot
-2. The URL is validated and the job is inserted into Postgres, within the user's queue and daily limits
-3. Workers are woken via Postgres `LISTEN/NOTIFY` and claim jobs with `FOR UPDATE SKIP LOCKED`
-4. While a job runs, the worker sends heartbeats and edits throttled progress into the original message
-5. The file is compressed to fit the upload limit if needed and sent back to the user
+1. A user sends a link (or uses `/dl`, `/mp3`, `/clip`, `/gif`, inline mode, or a `/follow` subscription produces one)
+2. If the same content was sent before, it is re-sent instantly from Telegram's copy (media cache)
+3. Otherwise the URL is validated and a job is queued in Postgres within the user's limits
+4. Workers are woken via Postgres `LISTEN/NOTIFY`, claim jobs with `FOR UPDATE SKIP LOCKED`, send heartbeats and edit throttled progress into a status message
+5. The result is compressed to fit if needed and sent back: a single file, or an album for multi-photo/video posts
 
 Reliability:
 - **Failures** retry with exponential backoff (30s, 2m, 8m, ...). Errors that will never succeed (private video, unsupported URL, too large) fail immediately.
@@ -41,33 +46,25 @@ Reliability:
 
 User commands:
 - `/start`, `/help` - show usage
-- `/queue` - show your active jobs and queue positions
-- `/history` - show your past downloads
-- `/mp3 <url>` - extract audio only
+- `/dl <url>` - download a link; in groups you can also reply `/dl` to a message with a link
+- `/mp3 <url>` - audio only, with title/artist tags and cover art
+- `/clip <url> <start-end>` - download only part of a video (e.g. `1:20-2:05`); sending `<url> 1:20-2:05` works too
+- `/gif <url> [start-end]` - turn up to 30 seconds of a video into a GIF
 - `/quality <url>` - choose the quality for one download
 - `/setquality` - set your default quality
 - `/playlist <url> [max]` - queue a playlist (up to 25)
+- `/follow <channel or playlist> [audio]` - get new uploads automatically; `/following` lists them, `/unfollow <n>` stops
+- `/queue` - your active jobs and queue positions
+- `/history` - your past downloads, with "Send again" buttons
 - `/cancel <job_id>` - cancel a pending or running job
+- `/settings` - language, default quality and (in groups) how links are handled
+- `/language` - change the language
+- `/premium`, `/paysupport` - when Premium is enabled
 
 You can also prefix a URL with `q360:`, `q480:`, `q720:`, `q1080:` or `audio:`.
 
-- `/settings` - language and default quality
-- `/language` - change the language
-
-## Languages
-
-The bot speaks 🇬🇧 English, 🇷🇺 Russian, 🇮🇳 Hindi and 🇮🇷 Persian.
-
-- **First contact:** the first `/start` in a private chat shows a flag picker. When the bot is added to a group, it posts the picker there. The choice is saved per chat.
-- **Changing it later:** use `/settings` → 🌐 Language, or `/language`. In groups, only group admins (and bot admins) can change it.
-- **Which language is used:** the chat's choice, then (in a group that hasn't chosen) the member's own choice, then their Telegram app language, then English.
-- **Command menu:** the "/" menu is localized too.
-- **Admin commands:** these reply in English.
-
-Translations live in `internal/i18n/catalog.go`. A test fails if any language is missing a message or uses different `%` placeholders from English.
-
-Admin commands:
-- `/stats` - bot analytics
+Admin commands (English only):
+- `/stats` - totals, success rate, cache hits, 7-day active/new/returning users, Premium revenue
 - `/health` - per-platform success rates (last 24h)
 - `/bandwidth [limit]` - per-user bandwidth report
 - `/users` - recently active users
@@ -77,8 +74,64 @@ Admin commands:
 - `/broadcast <message>` - message all users (throttled, runs in the background)
 - `/ban <user_id> [reason]` - block a user
 - `/unban <user_id>` - unblock a user
+- `/refund <charge_id>` - refund a Telegram Stars payment
 
-Inline mode (`@yourbot <url>` in any chat) needs inline mode and inline feedback (`/setinline`, `/setinlinefeedback`) enabled in @BotFather. The file goes to the user's private chat, so they must have started the bot first.
+## Features
+
+### Media cache
+Every finished upload's Telegram file ID is stored. The same content requested again is re-sent instantly, without downloading or uploading. This works even when the link differs, e.g. `youtu.be/x` vs `youtube.com/watch?v=x&si=...`.
+
+Cached deliveries don't count toward the daily quota. File IDs Telegram rejects are dropped, and the content is downloaded again. Entries unused for `cache.retention_days` (default 60) are pruned.
+
+### Albums
+Carousels and multi-photo posts on album sites are sent as Telegram albums, up to 10 items. The default album sites are Instagram, X/Twitter, Threads, TikTok, Reddit, Facebook and Bluesky (`services.ytdl.album_hosts`).
+
+Other sites keep single-video behaviour, so a YouTube `watch?v=...&list=...` link still downloads one video.
+
+### Groups
+Add the bot to a group. By default it downloads every link posted. A group admin can switch to "only with /dl" in `/settings`.
+
+In groups:
+- the bot replies to the message with the link
+- it skips percentage progress edits
+- it deletes its status message once the media is posted
+- it ignores links that aren't media instead of posting errors
+
+To see ordinary messages in auto mode, the bot needs privacy mode off (@BotFather → `/setprivacy` → Disable) or admin rights.
+
+### Inline mode
+Type `@yourbot <url>` in any chat:
+- **Already cached:** the media itself is shared instantly.
+- **Not yet downloaded:** a placeholder is posted and replaced with the video when it's ready. The file is also sent to the user's private chat, so they must have started the bot.
+
+This needs inline mode and inline feedback (`/setinline`, `/setinlinefeedback`) enabled in @BotFather.
+
+### Subscriptions
+`/follow` checks a channel or playlist every `subscriptions.interval_minutes` (default 60) and sends new uploads:
+- **Backlog:** existing uploads are skipped, and at most 5 new ones are sent per check.
+- **YouTube channel links** use their `/videos` tab.
+- **Limits:** a chat can follow up to `subscriptions.max_per_chat` (default 5) feeds. In groups, only admins can manage subscriptions.
+
+### Premium (Telegram Stars)
+Off by default. Set `premium.enabled: true` to sell `premium.days` (default 30) of Premium for `premium.price_stars` (default 100) Stars.
+
+Premium users get:
+- no daily quota (or `premium.daily_quota`)
+- a bigger queue (`premium.max_queued`, default 20)
+- queue priority
+
+Purchases stack. Payments are recorded idempotently, and `/refund` takes the days back. Telegram requires bots that sell for Stars to support `/paysupport`.
+
+## Languages
+
+The bot speaks 🇬🇧 English, 🇷🇺 Russian, 🇮🇳 Hindi and 🇮🇷 Persian.
+
+- **First contact:** the first `/start` in a private chat shows a flag picker. When the bot is added to a group, it posts the picker there. The choice is saved per chat.
+- **Changing it later:** use `/settings` → 🌐 Language, or `/language`. In groups, only group admins (and bot admins) can change it.
+- **Which language is used:** the chat's choice, then (in a group that hasn't chosen) the member's own choice, then their Telegram app language, then English.
+- **Command menu:** the "/" menu is localized too.
+
+Translations live in `internal/i18n/catalog.go`. A test fails if any language is missing a message or uses different `%` placeholders from English.
 
 ## Config
 
@@ -98,6 +151,10 @@ Key fields:
 - `downly.limits.max_retries` - auto-retry count for failed downloads
 - `downly.services.ytdl.auto_update_hours` - yt-dlp self-update interval
 - `downly.admin.user_ids` - Telegram user IDs with admin access
+- `downly.cache.disabled` / `retention_days` - media cache
+- `downly.services.ytdl.album_hosts` - sites whose multi-media posts become albums
+- `downly.subscriptions.disabled` / `interval_minutes` / `max_per_chat` - `/follow`
+- `downly.premium.enabled` / `price_stars` / `days` / `daily_quota` / `max_queued` - Premium
 
 Secrets can come from the environment instead of the file. These variables override it:
 
