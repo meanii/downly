@@ -11,6 +11,7 @@ import (
 	"github.com/go-telegram/bot"
 
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/i18n"
 	"github.com/meanii/downly/internal/safeurl"
 )
 
@@ -92,7 +93,7 @@ func TestTruncateRunesKeepsUTF8Valid(t *testing.T) {
 
 func TestBuildCaptionUTF8(t *testing.T) {
 	res := &downloader.Result{Title: strings.Repeat("é", 150)}
-	if c := buildCaption(res); !utf8.ValidString(c) {
+	if c := buildCaption(i18n.EN, res); !utf8.ValidString(c) {
 		t.Fatal("caption is not valid UTF-8")
 	}
 }
