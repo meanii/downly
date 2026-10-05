@@ -62,7 +62,7 @@ func (h *handler) enqueue(ctx context.Context, d download) (int64, error) {
 		return id, nil
 	}
 
-	if isAdmin(h.cfg, d.userID) {
+	if isAdmin(h.cfg, d.userID) || h.isPremium(ctx, d.userID) {
 		job.Priority = 1
 	}
 	reply, err := h.send(ctx, &bot.SendMessageParams{ChatID: d.chatID, Text: i18n.T(d.lang, "queueing"), ReplyParameters: replyParams(d.replyTo)})
@@ -72,7 +72,7 @@ func (h *handler) enqueue(ctx context.Context, d download) (int64, error) {
 	}
 	job.TelegramMsgID = int64(reply.ID)
 
-	jobID, err := db.EnqueueJob(ctx, h.pool, job, h.limitsFor(d.userID))
+	jobID, err := db.EnqueueJob(ctx, h.pool, job, h.limitsFor(ctx, d.userID))
 	if le, ok := db.IsLimit(err); ok {
 		h.edit(ctx, d.chatID, reply.ID, limitMessage(d.lang, le))
 		return 0, err
