@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/i18n"
 )
 
 func TestProgressBar(t *testing.T) {
@@ -32,7 +33,7 @@ func TestBuildCaption(t *testing.T) {
 		Platform: "youtube",
 		Duration: 125,
 	}
-	caption := buildCaption(res)
+	caption := buildCaption(i18n.EN, res)
 	if caption == "" {
 		t.Error("expected non-empty caption")
 	}
@@ -49,7 +50,7 @@ func TestBuildCaption(t *testing.T) {
 
 func TestBuildCaptionEmpty(t *testing.T) {
 	res := &downloader.Result{}
-	caption := buildCaption(res)
+	caption := buildCaption(i18n.EN, res)
 	if caption != "Done." {
 		t.Errorf("expected 'Done.' for empty result, got %q", caption)
 	}
@@ -60,7 +61,7 @@ func TestBuildCaptionUnknownPlatform(t *testing.T) {
 		Title:    "Some Title",
 		Platform: "unknown",
 	}
-	caption := buildCaption(res)
+	caption := buildCaption(i18n.EN, res)
 	if contains(caption, "unknown") {
 		t.Error("caption should not contain 'unknown' platform")
 	}
@@ -72,7 +73,7 @@ func TestBuildCaptionLongTitle(t *testing.T) {
 		longTitle += "a"
 	}
 	res := &downloader.Result{Title: longTitle, Platform: "test"}
-	caption := buildCaption(res)
+	caption := buildCaption(i18n.EN, res)
 	if len(caption) > 200 {
 		t.Errorf("caption too long: %d chars", len(caption))
 	}
@@ -99,7 +100,7 @@ func TestFormatDoneMessage(t *testing.T) {
 		Platform: "instagram",
 		Title:    "Cool Reel",
 	}
-	msg := formatDoneMessage(42, res)
+	msg := formatDoneMessage(i18n.EN, 42, res)
 	if !contains(msg, "#42") {
 		t.Error("expected job ID in message")
 	}
@@ -108,35 +109,6 @@ func TestFormatDoneMessage(t *testing.T) {
 	}
 	if !contains(msg, "instagram") {
 		t.Error("expected platform in message")
-	}
-}
-
-func TestParseJobURL(t *testing.T) {
-	tests := []struct {
-		raw         string
-		wantURL     string
-		wantMode    string
-		wantQuality string
-	}{
-		{"https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "default", ""},
-		{"audio:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "audio", ""},
-		{"q720:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q720"},
-		{"q480:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q480"},
-		{"q1080:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q1080"},
-		{"q360:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "q360"},
-		{"telegram:https://youtube.com/watch?v=abc", "https://youtube.com/watch?v=abc", "quality", "telegram"},
-	}
-	for _, tt := range tests {
-		url, mode, quality := parseJobURL(tt.raw)
-		if url != tt.wantURL {
-			t.Errorf("parseJobURL(%q) url = %q, want %q", tt.raw, url, tt.wantURL)
-		}
-		if mode != tt.wantMode {
-			t.Errorf("parseJobURL(%q) mode = %q, want %q", tt.raw, mode, tt.wantMode)
-		}
-		if quality != tt.wantQuality {
-			t.Errorf("parseJobURL(%q) quality = %q, want %q", tt.raw, quality, tt.wantQuality)
-		}
 	}
 }
 
