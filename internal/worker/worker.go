@@ -51,6 +51,10 @@ type Worker struct {
 
 	// HeartbeatInterval defaults to 30s; tests shorten it.
 	HeartbeatInterval time.Duration
+
+	// AfterJob, if set, is called once a job's processing has fully ended
+	// (all messages sent, files removed). Used by tests.
+	AfterJob func(jobID int64)
 }
 
 func (w *Worker) seen() {
@@ -124,6 +128,9 @@ func sleep(ctx context.Context, d time.Duration, wake <-chan struct{}) {
 func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *db.Job) {
 	log := workerLog.With("job_id", job.ID, "chat_id", job.ChatID, "url", job.URL, "mode", job.Mode, "quality", job.Quality)
 	log.Info("job claimed", "retry_count", job.RetryCount)
+	if w.AfterJob != nil {
+		defer w.AfterJob(job.ID)
+	}
 	workDir := w.Cfg.Downly.Worker.WorkDir
 	defer func() { _ = os.RemoveAll(jobDir(workDir, job.ID)) }()
 
@@ -201,10 +208,11 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 
 	fctx, cancel := w.finalizeCtx(workCtx)
 	defer cancel()
+	// Cache first: once the job reads as done, a repeat request must hit.
+	w.remember(fctx, log, job, items, meta)
 	if err := db.MarkDone(fctx, w.Pool, job.ID, res.FilePath, res.FileName, res.Platform, size); err != nil {
 		log.Error("mark done failed", "error", err)
 	}
-	w.remember(fctx, log, job, items, meta)
 	w.finishInline(fctx, log, job, lang, items, meta)
 	if isGroupChat(job.ChatID) {
 		// The media itself answers the link; the status message is clutter.

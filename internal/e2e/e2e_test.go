@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,6 +104,9 @@ type env struct {
 	workDir string
 	binDir  string
 	poller  *subscriptions.Poller
+
+	mu        sync.Mutex
+	processed map[int64]bool // jobs the worker has completely finished
 }
 
 func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
@@ -145,6 +149,7 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 	controller := worker.NewController()
 	tg.RegisterHandlers(logger, cfg, controller, b, pool)
 
+	e := &env{t: t, processed: map[int64]bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	waker := worker.NewWaker()
 	go worker.Listen(ctx, logger, pool, waker)
@@ -163,15 +168,21 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 		DL:         dl,
 		Msg:        worker.TelegramMessenger{Bot: b},
 		Controller: controller,
-		Waker:      waker,
-		Log:        logger,
+		AfterJob: func(id int64) {
+			e.mu.Lock()
+			e.processed[id] = true
+			e.mu.Unlock()
+		},
+		Waker: waker,
+		Log:   logger,
 	}
 	done := make(chan struct{})
 	go func() { w.Run(ctx, ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
 	poller := &subscriptions.Poller{Pool: pool, Fetcher: dl, Interval: time.Hour, Log: logger}
-	return &env{t: t, api: api, b: b, pool: pool, workDir: workDir, binDir: filepath.Dir(bin), poller: poller}
+	e.api, e.b, e.pool, e.workDir, e.binDir, e.poller = api, b, pool, workDir, filepath.Dir(bin), poller
+	return e
 }
 
 // ytdlpCalls returns the argument lists of yt-dlp download calls.
@@ -245,7 +256,14 @@ func (e *env) waitJob(userID int64) db.Job {
 		if len(jobs) == 1 {
 			switch jobs[0].Status {
 			case db.StatusDone, db.StatusFailed, db.StatusCanceled:
-				return jobs[0]
+				// Cache hits finish in the handler; worker jobs must also have
+				// sent their final messages.
+				e.mu.Lock()
+				done := jobs[0].Cached || e.processed[jobs[0].ID]
+				e.mu.Unlock()
+				if done {
+					return jobs[0]
+				}
 			}
 		}
 		select {
