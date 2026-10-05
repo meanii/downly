@@ -20,6 +20,7 @@ import (
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/dbtest"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/media"
 )
 
 // fakeDL writes a small file, optionally blocking or failing first.
@@ -60,6 +61,12 @@ func (f *fakeDL) DownloadWithQuality(ctx context.Context, workDir string, jobID 
 func (f *fakeDL) DownloadAudio(ctx context.Context, workDir string, jobID int64, url string, _ func(string, int)) (*downloader.Result, error) {
 	return f.run(ctx, workDir, jobID)
 }
+func (f *fakeDL) DownloadClip(ctx context.Context, workDir string, jobID int64, url, q string, r downloader.Range, _ func(string, int)) (*downloader.Result, error) {
+	return f.run(ctx, workDir, jobID)
+}
+func (f *fakeDL) DownloadGIF(ctx context.Context, workDir string, jobID int64, url string, r *downloader.Range, _ func(string, int)) (*downloader.Result, error) {
+	return f.run(ctx, workDir, jobID)
+}
 
 // blockUntilCanceled simulates a long download.
 func blockUntilCanceled(ctx context.Context, _ int) error {
@@ -71,6 +78,8 @@ type fakeMsg struct {
 	mu        sync.Mutex
 	edits     []string
 	uploads   int
+	captions  []string
+	inline    []string
 	uploadErr func(attempt int) error
 }
 
@@ -81,19 +90,38 @@ func (m *fakeMsg) Edit(_ context.Context, _ int64, _ int, text string) error {
 	return nil
 }
 func (m *fakeMsg) Send(context.Context, int64, string) error { return nil }
-func (m *fakeMsg) SendResult(ctx context.Context, _ int64, res *downloader.Result) error {
+func (m *fakeMsg) SendResult(ctx context.Context, _ int64, res *downloader.Result, opts SendOptions) ([]media.Item, error) {
 	m.mu.Lock()
+	m.captions = append(m.captions, opts.Caption)
 	m.uploads++
 	n := m.uploads
 	m.mu.Unlock()
 	if _, err := os.Stat(res.FilePath); err != nil {
-		return err
+		return nil, err
 	}
 	if m.uploadErr != nil {
-		return m.uploadErr(n)
+		if err := m.uploadErr(n); err != nil {
+			return nil, err
+		}
 	}
+	return []media.Item{{Kind: media.Video, FileID: fmt.Sprintf("fid-%d", n)}}, nil
+}
+func (m *fakeMsg) SendCached(context.Context, int64, []media.Item, media.Meta, SendOptions) error {
 	return nil
 }
+func (m *fakeMsg) EditInlineMedia(_ context.Context, id string, item media.Item, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inline = append(m.inline, "media:"+id+":"+item.FileID)
+	return nil
+}
+func (m *fakeMsg) EditInlineText(_ context.Context, id, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inline = append(m.inline, "text:"+id+":"+text)
+	return nil
+}
+func (m *fakeMsg) Delete(context.Context, int64, int) error { return nil }
 func (m *fakeMsg) lastEdit() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

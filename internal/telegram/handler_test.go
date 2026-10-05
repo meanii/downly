@@ -2,15 +2,10 @@ package telegram
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,92 +17,13 @@ import (
 	"github.com/meanii/downly/internal/config"
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/dbtest"
+	"github.com/meanii/downly/internal/tgtest"
 	"github.com/meanii/downly/internal/worker"
 )
 
-// fakeTelegram is a minimal Bot API server that records calls.
-type fakeTelegram struct {
-	mu        sync.Mutex
-	calls     []apiCall
-	nextMsgID int
-	forbidden map[int64]bool
-}
-
-type apiCall struct {
-	Method string
-	Fields map[string]string
-}
-
-func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
-	_ = r.ParseMultipartForm(1 << 20)
-	fields := map[string]string{}
-	if r.MultipartForm != nil {
-		for k, v := range r.MultipartForm.Value {
-			fields[k] = v[0]
-		}
-	}
-	f.mu.Lock()
-	f.calls = append(f.calls, apiCall{Method: method, Fields: fields})
-	f.nextMsgID++
-	id := f.nextMsgID
-	chatID, _ := strconv.ParseInt(fields["chat_id"], 10, 64)
-	blocked := f.forbidden[chatID]
-	f.mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	if blocked {
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`)
-		return
-	}
-	var result any
-	switch method {
-	case "getMe":
-		result = map[string]any{"id": 1, "is_bot": true, "first_name": "Downly", "username": "downly_test_bot"}
-	case "sendMessage", "editMessageText":
-		result = map[string]any{"message_id": id, "date": 0, "chat": map[string]any{"id": chatID, "type": "private"}, "text": fields["text"]}
-	default:
-		result = true
-	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": result})
-}
-
-// texts returns the text of every sendMessage/editMessageText to chatID.
-func (f *fakeTelegram) texts(chatID int64) []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for _, c := range f.calls {
-		if (c.Method == "sendMessage" || c.Method == "editMessageText") && c.Fields["chat_id"] == strconv.FormatInt(chatID, 10) {
-			out = append(out, c.Fields["text"])
-		}
-	}
-	return out
-}
-
-func (f *fakeTelegram) anyText(chatID int64, substr string) bool {
-	for _, t := range f.texts(chatID) {
-		if strings.Contains(t, substr) {
-			return true
-		}
-	}
-	return false
-}
-
-func (f *fakeTelegram) count(chatID int64, substr string) int {
-	n := 0
-	for _, t := range f.texts(chatID) {
-		if strings.Contains(t, substr) {
-			n++
-		}
-	}
-	return n
-}
-
 type botHarness struct {
 	t    *testing.T
-	tg   *fakeTelegram
+	tg   *tgtest.Server
 	b    *bot.Bot
 	pool *pgxpool.Pool
 	cfg  *config.Root
@@ -118,9 +34,7 @@ const adminID = 999
 func newBotHarness(t *testing.T) *botHarness {
 	t.Helper()
 	pool := dbtest.NewPool(t)
-	tg := &fakeTelegram{forbidden: map[int64]bool{}}
-	srv := httptest.NewServer(tg)
-	t.Cleanup(srv.Close)
+	tg := tgtest.New(t)
 
 	cfg := &config.Root{}
 	cfg.Downly.Limits.MaxQueuedPerUser = 5
@@ -128,7 +42,7 @@ func newBotHarness(t *testing.T) *botHarness {
 	cfg.Downly.Admin.UserIDs = []int64{adminID}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	b, err := bot.New("123:TEST", bot.WithServerURL(srv.URL), bot.WithNotAsyncHandlers(),
+	b, err := bot.New("123:TEST", bot.WithServerURL(tg.URL()), bot.WithNotAsyncHandlers(),
 		bot.WithMiddlewares(UserTracker(pool, logger)))
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +78,34 @@ func (h *botHarness) callback(userID int64, data string) {
 	})
 }
 
+// groupMessage sends text from userID in group chatID.
+func (h *botHarness) groupMessage(chatID, userID int64, text string) {
+	nextUpdateID++
+	h.b.ProcessUpdate(context.Background(), &models.Update{
+		ID: nextUpdateID,
+		Message: &models.Message{
+			ID:   int(nextUpdateID),
+			From: &models.User{ID: userID, FirstName: "U"},
+			Chat: models.Chat{ID: chatID, Type: models.ChatTypeSupergroup},
+			Text: text,
+		},
+	})
+}
+
+// buttonPress presses a button on a message in chat.
+func (h *botHarness) buttonPress(chat models.Chat, userID int64, data string) {
+	nextUpdateID++
+	h.b.ProcessUpdate(context.Background(), &models.Update{
+		ID: nextUpdateID,
+		CallbackQuery: &models.CallbackQuery{
+			ID:      fmt.Sprint(nextUpdateID),
+			From:    models.User{ID: userID},
+			Message: models.MaybeInaccessibleMessage{Message: &models.Message{ID: 42, Chat: chat}},
+			Data:    data,
+		},
+	})
+}
+
 func (h *botHarness) jobs(userID int64) []db.Job {
 	h.t.Helper()
 	jobs, err := db.GetUserJobs(context.Background(), h.pool, userID, 100)
@@ -184,8 +126,8 @@ func TestHandlerQueuesURL(t *testing.T) {
 	if jobs[0].Quality != "q720" || jobs[0].URL != "https://youtu.be/xyz" || jobs[1].Quality != "" {
 		t.Fatalf("jobs = %+v", jobs)
 	}
-	if h.tg.count(1, "queued") != 2 {
-		t.Fatalf("expected two queued acks, got %v", h.tg.texts(1))
+	if h.tg.Count(1, "queued") != 2 {
+		t.Fatalf("expected two queued acks, got %v", h.tg.Texts(1))
 	}
 	// The user was recorded by the middleware.
 	if ids, _ := db.GetAllChatIDs(context.Background(), h.pool); len(ids) != 1 || ids[0] != 1 {
@@ -208,8 +150,8 @@ func TestHandlerRejectsUnsafeURL(t *testing.T) {
 	if len(h.jobs(1)) != 0 {
 		t.Fatal("unsafe URL was queued")
 	}
-	if !h.tg.anyText(1, "not supported") {
-		t.Fatalf("no rejection message: %v", h.tg.texts(1))
+	if !h.tg.AnyText(1, "not supported") {
+		t.Fatalf("no rejection message: %v", h.tg.Texts(1))
 	}
 }
 
@@ -220,8 +162,8 @@ func TestHandlerQueueLimitReportsOnce(t *testing.T) {
 	if n := len(h.jobs(1)); n != 2 {
 		t.Fatalf("jobs = %d, want 2", n)
 	}
-	if n := h.tg.count(1, "Queue limit reached"); n != 1 {
-		t.Fatalf("limit message sent %d times, want 1: %v", n, h.tg.texts(1))
+	if n := h.tg.Count(1, "Queue limit reached"); n != 1 {
+		t.Fatalf("limit message sent %d times, want 1: %v", n, h.tg.Texts(1))
 	}
 }
 
@@ -232,7 +174,7 @@ func TestHandlerDailyQuotaSkipsAdmins(t *testing.T) {
 	if n := len(h.jobs(1)); n != 1 {
 		t.Fatalf("user jobs = %d, want 1", n)
 	}
-	if !h.tg.anyText(1, "Daily limit reached") {
+	if !h.tg.AnyText(1, "Daily limit reached") {
 		t.Fatal("no daily limit message")
 	}
 	h.message(adminID, "https://a.com/1 https://a.com/2")
@@ -244,20 +186,20 @@ func TestHandlerDailyQuotaSkipsAdmins(t *testing.T) {
 
 func TestHandlerCommandRouting(t *testing.T) {
 	h := newBotHarness(t)
-	h.message(1, "/start@downly_test_bot")
-	if !h.tg.anyText(1, "Send me a media URL") {
-		t.Fatal("/start@ourbot not handled")
+	h.message(1, "/help@downly_test_bot")
+	if !h.tg.AnyText(1, "Send me a media link") {
+		t.Fatal("/help@ourbot not handled")
 	}
 
-	before := len(h.tg.texts(1))
+	before := len(h.tg.Texts(1))
 	h.message(1, "/start@some_other_bot")
 	h.message(1, "/banana 5")
-	if after := len(h.tg.texts(1)); after != before {
-		t.Fatalf("commands for other bots / unknown commands must be ignored: %v", h.tg.texts(1)[before:])
+	if after := len(h.tg.Texts(1)); after != before {
+		t.Fatalf("commands for other bots / unknown commands must be ignored: %v", h.tg.Texts(1)[before:])
 	}
 
 	h.message(1, "/ban 5")
-	if !h.tg.anyText(1, "Admin only command.") {
+	if !h.tg.AnyText(1, "This command is for admins only.") {
 		t.Fatal("non-admin /ban should be refused")
 	}
 	if banned, _ := db.IsBanned(context.Background(), h.pool, 5); banned {
@@ -268,7 +210,7 @@ func TestHandlerCommandRouting(t *testing.T) {
 		t.Fatal("admin /BAN (any case) should ban")
 	}
 	h.message(5, "https://a.com/1")
-	if len(h.jobs(5)) != 0 || !h.tg.anyText(5, "banned") {
+	if len(h.jobs(5)) != 0 || !h.tg.AnyText(5, "banned") {
 		t.Fatal("banned user could queue")
 	}
 }
@@ -278,7 +220,7 @@ func TestHandlerCancel(t *testing.T) {
 	h.message(1, "https://a.com/1")
 	id := h.jobs(1)[0].ID
 	h.message(2, fmt.Sprintf("/cancel %d", id))
-	if !h.tg.anyText(2, "does not belong to you") {
+	if !h.tg.AnyText(2, "doesn't belong to you") {
 		t.Fatal("other user's cancel not refused")
 	}
 	h.message(1, fmt.Sprintf("/cancel #%d", id))
@@ -286,7 +228,7 @@ func TestHandlerCancel(t *testing.T) {
 		t.Fatal("job not canceled")
 	}
 	h.message(1, fmt.Sprintf("/cancel %d", id))
-	if !h.tg.anyText(1, "already finished") {
+	if !h.tg.AnyText(1, "already finished") {
 		t.Fatal("second cancel should say already finished")
 	}
 }
@@ -314,9 +256,7 @@ func TestHandlerForgedCallbacks(t *testing.T) {
 func TestHandlerMarksBlockedUsers(t *testing.T) {
 	h := newBotHarness(t)
 	h.message(1, "/start")
-	h.tg.mu.Lock()
-	h.tg.forbidden[1] = true
-	h.tg.mu.Unlock()
+	h.tg.SetForbidden(1, true)
 	h.message(1, "/help")
 	// TouchUser clears the flag on contact, then the failed reply sets it.
 	if ids, _ := db.GetAllChatIDs(context.Background(), h.pool); len(ids) != 0 {
