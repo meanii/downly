@@ -19,6 +19,8 @@ func Stage(l Lang, text string) string {
 		return T(l, "stage_finalizing")
 	case strings.HasPrefix(text, "Trying"):
 		return T(l, "stage_trying_alt")
+	case strings.HasPrefix(text, "Converting"):
+		return T(l, "stage_gif")
 	case text == "Extracting audio":
 		return T(l, "stage_audio")
 	case text == "Uploading to Telegram":

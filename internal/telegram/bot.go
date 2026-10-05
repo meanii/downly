@@ -61,7 +61,11 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	}
 	h.commands = h.commandTable()
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypeContains, h.onMessage)
+	// Only messages with text: service messages (payments, joins) have none
+	// and need their own handlers below.
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.Text != ""
+	}, h.onMessage)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "dl:")
 	}, h.onQualityCallback)
@@ -78,6 +82,16 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && u.CallbackQuery.Data == "noop"
 	}, h.onNoopCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "unf:")
+	}, h.onUnfollowCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && u.CallbackQuery.Data == "buy:premium"
+	}, h.onBuyCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.PreCheckoutQuery != nil }, h.onPreCheckout)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.SuccessfulPayment != nil
+	}, h.onSuccessfulPayment)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
 }
@@ -101,27 +115,56 @@ func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 
-	urls := extractURLs(text)
-	if len(urls) == 0 {
+	reqs := extractRequests(text)
+	if len(reqs) == 0 {
 		return
 	}
+	if isGroup(msg.Chat) {
+		mode, err := db.GetGroupMode(ctx, h.pool, msg.Chat.ID)
+		if err != nil {
+			h.log.Warn("load group mode failed", "chat_id", msg.Chat.ID, "error", err)
+		}
+		if mode == db.GroupModeCommand {
+			return // this group only downloads via /dl
+		}
+	}
+	h.downloadAll(ctx, msg, reqs, msg.ID, false)
+}
+
+// downloadAll queues every request from msg (as GIFs when gif is set). In
+// groups the bot answers replyTo (the message holding the links); in
+// private chats it doesn't thread replies.
+func (h *handler) downloadAll(ctx context.Context, msg *models.Message, reqs []urlRequest, replyTo int, gif bool) {
 	chatID, userID := msg.Chat.ID, msg.From.ID
 	lang := h.langFor(ctx, chatID, msg.From)
+	if !isGroup(msg.Chat) {
+		replyTo = 0
+	}
 	if !h.allowSubmit(ctx, chatID, userID, lang) {
 		return
 	}
 	quality := h.preferredQuality(ctx, userID)
-	for _, url := range urls {
+	for _, req := range reqs {
+		if text, ok := checkClip(lang, req.clip, gif); !ok {
+			h.replyTo(ctx, chatID, replyTo, text)
+			return
+		}
+		url := req.url
 		// Apply the user's quality preference if no explicit prefix
-		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" {
+		if _, prefix := stripModePrefix(url); prefix == "" && quality != "" && !gif {
 			url = quality + ":" + url
 		}
-		if _, err := h.enqueue(ctx, download{chatID: chatID, userID: userID, lang: lang, url: url}); err != nil {
+		d := download{chatID: chatID, userID: userID, lang: lang, url: url, replyTo: replyTo, clip: req.clip, gif: gif}
+		if _, err := h.enqueue(ctx, d); err != nil {
 			// Limit and validation errors were already reported; stop on the
 			// first so a long list does not produce a wall of errors.
 			return
 		}
 	}
+}
+
+func isGroup(chat models.Chat) bool {
+	return chat.Type == models.ChatTypeGroup || chat.Type == models.ChatTypeSupergroup
 }
 
 // parseCommand splits "/name@bot args" into ("name", "args"). ok is false
@@ -255,9 +298,14 @@ func (h *handler) preferredQuality(ctx context.Context, userID int64) string {
 	return ""
 }
 
-func (h *handler) limitsFor(userID int64) db.EnqueueLimits {
+func (h *handler) limitsFor(ctx context.Context, userID int64) db.EnqueueLimits {
 	lim := db.EnqueueLimits{MaxQueued: h.cfg.Downly.Limits.MaxQueuedPerUser}
-	if !isAdmin(h.cfg, userID) {
+	switch {
+	case isAdmin(h.cfg, userID):
+	case h.isPremium(ctx, userID):
+		lim.MaxQueued = max(lim.MaxQueued, h.cfg.Downly.Premium.MaxQueued)
+		lim.DailyQuota = h.cfg.Downly.Premium.DailyQuota // 0 = unlimited
+	default:
 		lim.DailyQuota = h.cfg.Downly.Limits.DailyQuotaPerUser
 	}
 	return lim

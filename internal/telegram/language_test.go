@@ -251,7 +251,7 @@ func TestBotAddedToGroupAsksForLanguage(t *testing.T) {
 
 func TestCommandMenusPublishedPerLanguage(t *testing.T) {
 	h := newBotHarness(t)
-	SetCommandMenus(context.Background(), h.b, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	SetCommandMenus(context.Background(), h.b, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
 	calls := h.tg.CallsTo("setMyCommands")
 	if len(calls) != 1+len(i18n.Languages) {
 		t.Fatalf("setMyCommands calls = %d", len(calls))

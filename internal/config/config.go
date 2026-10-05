@@ -22,6 +22,10 @@ type Downly struct {
 	Admin    Admin    `yaml:"admin"`
 	Cleanup  Cleanup  `yaml:"cleanup"`
 	Cache    Cache    `yaml:"cache"`
+	// Subscriptions controls /follow.
+	Subscriptions Subscriptions `yaml:"subscriptions"`
+	// Premium sells higher limits for Telegram Stars.
+	Premium Premium `yaml:"premium"`
 }
 
 type Telegram struct {
@@ -63,6 +67,9 @@ type YTDLP struct {
 	Bin             string `yaml:"bin"`
 	CookiesFile     string `yaml:"cookies_file"`
 	AutoUpdateHours int    `yaml:"auto_update_hours"`
+	// AlbumHosts overrides the sites whose multi-photo/video posts are sent
+	// as albums (default: downloader.DefaultAlbumHosts).
+	AlbumHosts []string `yaml:"album_hosts"`
 }
 
 type Limits struct {
@@ -84,6 +91,28 @@ type Cache struct {
 	Disabled bool `yaml:"disabled"`
 	// RetentionDays drops entries unused for this long (default 60).
 	RetentionDays int `yaml:"retention_days"`
+}
+
+// Subscriptions controls following channels and playlists.
+type Subscriptions struct {
+	Disabled bool `yaml:"disabled"`
+	// IntervalMinutes between checks of each feed (default 60).
+	IntervalMinutes int `yaml:"interval_minutes"`
+	// MaxPerChat caps feeds per chat (default 5).
+	MaxPerChat int `yaml:"max_per_chat"`
+}
+
+// Premium is an optional paid tier sold for Telegram Stars.
+type Premium struct {
+	Enabled bool `yaml:"enabled"`
+	// PriceStars per period (default 100).
+	PriceStars int `yaml:"price_stars"`
+	// Days per purchase (default 30). Purchases stack.
+	Days int `yaml:"days"`
+	// DailyQuota for premium users; 0 = unlimited.
+	DailyQuota int `yaml:"daily_quota"`
+	// MaxQueued pending downloads for premium users (default 20).
+	MaxQueued int `yaml:"max_queued"`
 }
 
 type Cleanup struct {
@@ -176,6 +205,21 @@ func Load(path string) (*Root, error) {
 
 	if cfg.Downly.Cleanup.RetentionHours <= 0 {
 		cfg.Downly.Cleanup.RetentionHours = 72
+	}
+	if cfg.Downly.Premium.PriceStars <= 0 {
+		cfg.Downly.Premium.PriceStars = 100
+	}
+	if cfg.Downly.Premium.Days <= 0 {
+		cfg.Downly.Premium.Days = 30
+	}
+	if cfg.Downly.Premium.MaxQueued <= 0 {
+		cfg.Downly.Premium.MaxQueued = 20
+	}
+	if cfg.Downly.Subscriptions.IntervalMinutes <= 0 {
+		cfg.Downly.Subscriptions.IntervalMinutes = 60
+	}
+	if cfg.Downly.Subscriptions.MaxPerChat <= 0 {
+		cfg.Downly.Subscriptions.MaxPerChat = 5
 	}
 	if cfg.Downly.Cache.RetentionDays <= 0 {
 		cfg.Downly.Cache.RetentionDays = 60
