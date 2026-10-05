@@ -120,12 +120,36 @@ type Cleanup struct {
 	RetentionHours int  `yaml:"retention_hours"`
 }
 
+// Upload limits of the Telegram Bot API, in MiB, with headroom: the public
+// server takes 50MB, a self-hosted one 2000MB.
+const (
+	CloudAPIMaxFileMB = 50
+	LocalAPIMaxFileMB = 1900
+)
+
+// UsesLocalAPI reports whether the bot talks to a self-hosted Bot API server.
+func (c *Root) UsesLocalAPI() bool { return c.Downly.Telegram.APIURL != "" }
+
+// Warnings lists settings that will not work as configured.
+func (c *Root) Warnings() []string {
+	var w []string
+	if !c.UsesLocalAPI() && c.Downly.Worker.MaxFileSizeMB > CloudAPIMaxFileMB {
+		w = append(w, fmt.Sprintf("worker.max_file_size_mb is %d but the public Bot API accepts only %dMB; set telegram.api_url to a local Bot API server for up to 2000MB",
+			c.Downly.Worker.MaxFileSizeMB, CloudAPIMaxFileMB))
+	}
+	if c.Downly.Worker.MaxFileSizeMB > 2000 {
+		w = append(w, fmt.Sprintf("worker.max_file_size_mb is %d; Telegram never accepts files over 2000MB", c.Downly.Worker.MaxFileSizeMB))
+	}
+	return w
+}
+
 // Environment variables that override (or replace) config file values, so
 // secrets need not live in config.yaml.
 const (
 	EnvBotToken    = "DOWNLY_BOT_TOKEN"
 	EnvPostgresURL = "DOWNLY_POSTGRES_URL"
 	EnvAdminIDs    = "DOWNLY_ADMIN_IDS" // comma-separated Telegram user IDs
+	EnvAPIURL      = "DOWNLY_API_URL"   // self-hosted Bot API server
 )
 
 // Load reads the YAML config at path, applies environment overrides and
@@ -164,9 +188,16 @@ func Load(path string) (*Root, error) {
 	}
 	if cfg.Downly.Worker.MaxFileSizeMB <= 0 {
 		cfg.Downly.Worker.MaxFileSizeMB = 45
+		if cfg.UsesLocalAPI() {
+			cfg.Downly.Worker.MaxFileSizeMB = LocalAPIMaxFileMB
+		}
 	}
 	if cfg.Downly.Worker.MaxDownloadMB <= 0 {
 		cfg.Downly.Worker.MaxDownloadMB = 4 * cfg.Downly.Worker.MaxFileSizeMB
+		if cfg.UsesLocalAPI() {
+			// 4x would be ~8GB per job; keep disk use sane.
+			cfg.Downly.Worker.MaxDownloadMB = 2 * cfg.Downly.Worker.MaxFileSizeMB
+		}
 	}
 	if cfg.Downly.Worker.MaxDownloadMB < cfg.Downly.Worker.MaxFileSizeMB {
 		cfg.Downly.Worker.MaxDownloadMB = cfg.Downly.Worker.MaxFileSizeMB
@@ -233,6 +264,9 @@ func Load(path string) (*Root, error) {
 func applyEnv(cfg *Root) error {
 	if v := os.Getenv(EnvBotToken); v != "" {
 		cfg.Downly.Telegram.BotToken = v
+	}
+	if v := os.Getenv(EnvAPIURL); v != "" {
+		cfg.Downly.Telegram.APIURL = v
 	}
 	if v := os.Getenv(EnvPostgresURL); v != "" {
 		cfg.Downly.Database.PostgresURL = v

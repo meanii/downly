@@ -96,10 +96,13 @@ func TestUploadTimeout(t *testing.T) {
 	if d := uploadTimeout(0); d != 2*time.Minute {
 		t.Fatalf("got %v", d)
 	}
-	if d := uploadTimeout(50 * 1024 * 1024); d <= 2*time.Minute || d > 30*time.Minute {
+	if d := uploadTimeout(50 * 1024 * 1024); d != 2*time.Minute+200*time.Second {
 		t.Fatalf("got %v", d)
 	}
-	if d := uploadTimeout(1 << 40); d != 30*time.Minute {
+	if d := uploadTimeout(1900 * 1024 * 1024); d != 60*time.Minute {
+		t.Fatalf("2GB-class upload: got %v", d)
+	}
+	if d := uploadTimeout(1 << 40); d != 60*time.Minute {
 		t.Fatalf("got %v", d)
 	}
 }
