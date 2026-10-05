@@ -11,26 +11,40 @@ import (
 	"github.com/meanii/downly/internal/safeurl"
 )
 
-// permanentMarkers are yt-dlp/extractor messages that no retry will fix.
+// permanentMarkers are extractor messages that no retry will fix, on top of
+// downloader.IsUnavailable.
 var permanentMarkers = []string{
 	"unsupported url",
 	"is not a valid url",
-	"private video",
-	"video unavailable",
-	"this video is unavailable",
-	"this video has been removed",
-	"members-only",
-	"join this channel",
-	"sign in to confirm your age",
-	"age-restricted",
-	"copyright",
 	"http error 404",
 	"http error 410",
-	"file is larger than max-filesize",
 	"no video or image could be extracted",
 	"no video formats found",
 	"there is no video in this post",
-	"requested content is not available",
+}
+
+// notMediaMarkers mean the link simply isn't media (an article, a profile
+// page...), as opposed to media that failed to download.
+var notMediaMarkers = []string{
+	"unsupported url",
+	"no video or image could be extracted",
+	"no video formats found",
+	"there is no video in this post",
+	"no video could be found",
+}
+
+// isNotMedia reports whether err means the link holds nothing downloadable.
+func isNotMedia(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range notMediaMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // isPermanent reports whether retrying err is pointless.
@@ -38,7 +52,7 @@ func isPermanent(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, downloader.ErrTooLarge) || errors.Is(err, safeurl.ErrInvalidURL) ||
+	if downloader.IsUnavailable(err) || errors.Is(err, downloader.ErrBadRange) || errors.Is(err, safeurl.ErrInvalidURL) ||
 		errors.Is(err, safeurl.ErrBlockedHost) || errors.Is(err, safeurl.ErrTooLarge) {
 		return true
 	}

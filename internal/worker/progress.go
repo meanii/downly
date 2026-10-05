@@ -25,6 +25,9 @@ type progressReporter struct {
 
 	mu          sync.Mutex
 	lastPercent int
+	// quiet suppresses percentage updates (stage changes via Force still
+	// show), to keep group chats calm.
+	quiet bool
 }
 
 func newProgressReporter(ctx context.Context, store func(context.Context, string, int) error, edit func(context.Context, string) error, format func(string, int) string) *progressReporter {
@@ -41,6 +44,9 @@ func newProgressReporter(ctx context.Context, store func(context.Context, string
 // Update records progress. Calls that arrive faster than progressInterval are
 // dropped, except that the very first update is always shown.
 func (p *progressReporter) Update(text string, percent int) {
+	if p.quiet {
+		return
+	}
 	p.mu.Lock()
 	if percent == p.lastPercent {
 		p.mu.Unlock()

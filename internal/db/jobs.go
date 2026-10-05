@@ -27,6 +27,8 @@ type JobMode string
 const (
 	ModeVideo JobMode = "video"
 	ModeAudio JobMode = "audio"
+	// ModeGIF converts (a section of) a video into a Telegram GIF.
+	ModeGIF JobMode = "gif"
 )
 
 type Job struct {
@@ -47,9 +49,16 @@ type Job struct {
 	ProgressText    string
 	ProgressPercent int
 	QueuePosition   int
-	CreatedAt       time.Time
-	StartedAt       *time.Time
-	FinishedAt      *time.Time
+	CacheKey        string
+	Cached          bool
+	InlineMessageID string
+	ReplyTo         int64
+	// ClipStart/ClipEnd select a section in seconds (both 0 = whole video).
+	ClipStart  int
+	ClipEnd    int
+	CreatedAt  time.Time
+	StartedAt  *time.Time
+	FinishedAt *time.Time
 }
 
 // NewJob holds what is needed to enqueue a download.
@@ -61,6 +70,14 @@ type NewJob struct {
 	Quality       string
 	TelegramMsgID int64
 	Priority      int
+	// CacheKey identifies the content for the media cache ("" = uncacheable).
+	CacheKey string
+	// InlineMessageID is set for inline-mode requests.
+	InlineMessageID string
+	// ReplyTo is the message the job answers (0 = none).
+	ReplyTo int64
+	// ClipStart/ClipEnd select a section in seconds (both 0 = whole video).
+	ClipStart, ClipEnd int
 }
 
 type QueueStats struct {
@@ -71,13 +88,15 @@ type QueueStats struct {
 
 // jobColumns and scanJob keep every full-row query in sync.
 const jobColumns = `id, chat_id, user_id, url, mode, quality, platform, status, priority, output_path, output_name,
-	error_message, retry_count, telegram_message_id, progress_text, progress_percent, created_at, started_at, finished_at`
+	error_message, retry_count, telegram_message_id, progress_text, progress_percent, cache_key, cached,
+	inline_message_id, reply_to_message_id, clip_start, clip_end, created_at, started_at, finished_at`
 
 func scanJob(row pgx.Row) (Job, error) {
 	var job Job
 	err := row.Scan(&job.ID, &job.ChatID, &job.UserID, &job.URL, &job.Mode, &job.Quality, &job.Platform, &job.Status,
 		&job.Priority, &job.OutputPath, &job.OutputName, &job.ErrorMessage, &job.RetryCount, &job.TelegramMsgID,
-		&job.ProgressText, &job.ProgressPercent, &job.CreatedAt, &job.StartedAt, &job.FinishedAt)
+		&job.ProgressText, &job.ProgressPercent, &job.CacheKey, &job.Cached, &job.InlineMessageID,
+		&job.ReplyTo, &job.ClipStart, &job.ClipEnd, &job.CreatedAt, &job.StartedAt, &job.FinishedAt)
 	return job, err
 }
 
@@ -104,10 +123,11 @@ func InsertJob(ctx context.Context, pool *pgxpool.Pool, j NewJob) (int64, error)
 	}
 	var jobID int64
 	err := pool.QueryRow(ctx, `
-		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id, progress_text, progress_percent)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0)
+		insert into download_jobs (chat_id, user_id, url, mode, quality, status, priority, telegram_message_id,
+			progress_text, progress_percent, cache_key, inline_message_id, reply_to_message_id, clip_start, clip_end)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, 'Queued', 0, $9, $10, $11, $12, $13)
 		returning id
-	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID).Scan(&jobID)
+	`, j.ChatID, j.UserID, j.URL, j.Mode, j.Quality, StatusPending, j.Priority, j.TelegramMsgID, j.CacheKey, j.InlineMessageID, j.ReplyTo, j.ClipStart, j.ClipEnd).Scan(&jobID)
 	return jobID, err
 }
 
@@ -127,18 +147,28 @@ func expectProcessing(cmd pgconn.CommandTag, err error) error {
 
 // ClaimJob atomically takes the next due pending job.
 func ClaimJob(ctx context.Context, pool *pgxpool.Pool, workerID string) (*Job, error) {
+	return ClaimJobLimited(ctx, pool, workerID, 0)
+}
+
+// ClaimJobLimited is ClaimJob, skipping users who already have maxPerUser
+// jobs processing (0 = no cap). Two workers claiming at the same instant can
+// overshoot the cap by one; that is accepted to keep claims lock-free.
+func ClaimJobLimited(ctx context.Context, pool *pgxpool.Pool, workerID string, maxPerUser int) (*Job, error) {
 	row := pool.QueryRow(ctx, `
 		update download_jobs
 		set status = $2, started_at = now(), heartbeat_at = now(), worker_id = $3,
 			progress_text = 'Starting download', progress_percent = 1
 		where id = (
-			select id from download_jobs
-			where status = $1 and next_attempt_at <= now()
-			order by priority desc, created_at asc
+			select d.id from download_jobs d
+			where d.status = $1 and d.next_attempt_at <= now()
+			and ($4 <= 0 or (
+				select count(*) from download_jobs p where p.user_id = d.user_id and p.status = $2
+			) < $4)
+			order by d.priority desc, d.created_at asc
 			for update skip locked
 			limit 1
 		)
-		returning `+jobColumns, StatusPending, StatusProcessing, workerID)
+		returning `+jobColumns, StatusPending, StatusProcessing, workerID, maxPerUser)
 	job, err := scanJob(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -339,7 +369,7 @@ func UserDailyJobCount(ctx context.Context, pool *pgxpool.Pool, userID int64) (i
 	var count int
 	err := pool.QueryRow(ctx, `
 		select count(*) from download_jobs
-		where user_id = $1 and created_at >= now() - interval '24 hours'
+		where user_id = $1 and not cached and created_at >= now() - interval '24 hours'
 	`, userID).Scan(&count)
 	return count, err
 }
@@ -410,10 +440,16 @@ func PruneJobs(ctx context.Context, pool *pgxpool.Pool, retentionHours int) (int
 	return n, err
 }
 
-// modeLabel is a short tag for job listings, e.g. "audio" or "720p".
-func modeLabel(job Job) string {
+// ModeLabel is a short tag for job listings, e.g. "audio" or "720p".
+func ModeLabel(job Job) string {
 	if job.Mode == ModeAudio {
 		return "audio"
+	}
+	if job.Mode == ModeGIF {
+		return "gif"
+	}
+	if job.ClipEnd > job.ClipStart {
+		return fmt.Sprintf("clip %d-%ds", job.ClipStart, job.ClipEnd)
 	}
 	switch job.Quality {
 	case "q360":
@@ -430,60 +466,6 @@ func modeLabel(job Job) string {
 	return ""
 }
 
-func FormatUserQueueSummary(jobs []Job) string {
-	if len(jobs) == 0 {
-		return "You have no recent jobs. Send a URL to queue a download."
-	}
-	lines := []string{"Your recent jobs:"}
-	for _, job := range jobs {
-		line := fmt.Sprintf("#%d | %s | %s", job.ID, job.Status, trimURL(job.URL))
-		if l := modeLabel(job); l != "" {
-			line += " | " + l
-		}
-		if job.Priority > 0 {
-			line += fmt.Sprintf(" | priority %d", job.Priority)
-		}
-		if job.Status == StatusPending && job.QueuePosition > 0 {
-			line += fmt.Sprintf(" | position %d", job.QueuePosition)
-		}
-		if job.ProgressText != "" {
-			line += fmt.Sprintf(" | %s", job.ProgressText)
-		}
-		if job.ProgressPercent > 0 {
-			line += fmt.Sprintf(" (%d%%)", job.ProgressPercent)
-		}
-		if job.Status == StatusCanceled && job.ErrorMessage != "" {
-			line += fmt.Sprintf(" | reason: %s", job.ErrorMessage)
-		}
-		lines = append(lines, line)
-	}
-	return joinLines(lines)
-}
-
-func FormatUserHistory(jobs []Job) string {
-	if len(jobs) == 0 {
-		return "No download history yet."
-	}
-	lines := []string{"Your download history:"}
-	for _, job := range jobs {
-		line := fmt.Sprintf("#%d | %s | %s", job.ID, job.Status, trimURL(job.URL))
-		if l := modeLabel(job); l != "" {
-			line += " | " + l
-		}
-		if job.Platform != "" {
-			line += fmt.Sprintf(" | %s", job.Platform)
-		}
-		if job.Status == StatusCanceled && job.ErrorMessage != "" {
-			line += fmt.Sprintf(" | %s", job.ErrorMessage)
-		}
-		if job.FinishedAt != nil {
-			line += fmt.Sprintf(" | %s", job.FinishedAt.Format("Jan 02 15:04"))
-		}
-		lines = append(lines, line)
-	}
-	return joinLines(lines)
-}
-
 func FormatActiveJobs(jobs []Job) string {
 	if len(jobs) == 0 {
 		return "No active or pending jobs."
@@ -491,7 +473,7 @@ func FormatActiveJobs(jobs []Job) string {
 	lines := []string{fmt.Sprintf("Active/pending jobs (%d):", len(jobs))}
 	for _, job := range jobs {
 		line := fmt.Sprintf("#%d | %s | user %d | %s", job.ID, job.Status, job.UserID, trimURL(job.URL))
-		if l := modeLabel(job); l != "" {
+		if l := ModeLabel(job); l != "" {
 			line += " | " + l
 		}
 		if job.ProgressText != "" {
