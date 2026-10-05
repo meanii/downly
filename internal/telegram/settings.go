@@ -219,7 +219,10 @@ func (h *handler) onMyChatMember(ctx context.Context, _ *bot.Bot, update *models
 
 // --- Command menus ---
 
-var menuCommands = []string{"start", "dl", "queue", "history", "mp3", "clip", "gif", "quality", "setquality", "playlist", "cancel", "settings"}
+var menuCommands = []string{"start", "dl", "queue", "history", "mp3", "clip", "gif", "follow", "following", "quality", "setquality", "playlist", "cancel", "settings"}
+
+// premiumCommands are listed only when premium is enabled.
+var premiumCommands = []string{"premium", "paysupport"}
 
 func groupModeLabel(lang i18n.Lang, mode string) string {
 	if mode == db.GroupModeCommand {
@@ -228,9 +231,13 @@ func groupModeLabel(lang i18n.Lang, mode string) string {
 	return i18n.T(lang, "group_links_auto")
 }
 
-func commandMenu(lang i18n.Lang) []models.BotCommand {
-	cmds := make([]models.BotCommand, 0, len(menuCommands))
-	for _, c := range menuCommands {
+func commandMenu(lang i18n.Lang, withPremium bool) []models.BotCommand {
+	names := menuCommands
+	if withPremium {
+		names = append(append([]string{}, menuCommands...), premiumCommands...)
+	}
+	cmds := make([]models.BotCommand, 0, len(names))
+	for _, c := range names {
 		cmds = append(cmds, models.BotCommand{Command: c, Description: i18n.T(lang, "cmd_"+c)})
 	}
 	return cmds
@@ -239,12 +246,12 @@ func commandMenu(lang i18n.Lang) []models.BotCommand {
 // SetCommandMenus publishes the "/" command menu in every language, keyed
 // by the user's Telegram client language. Chats that chose a language get a
 // per-chat menu when they choose.
-func SetCommandMenus(ctx context.Context, b *bot.Bot, log *slog.Logger) {
-	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: commandMenu(i18n.Default)}); err != nil {
+func SetCommandMenus(ctx context.Context, b *bot.Bot, log *slog.Logger, withPremium bool) {
+	if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: commandMenu(i18n.Default, withPremium)}); err != nil {
 		log.Warn("set default command menu failed", "error", err)
 	}
 	for _, info := range i18n.Languages {
-		if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: commandMenu(info.Code), LanguageCode: string(info.Code)}); err != nil {
+		if _, err := b.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: commandMenu(info.Code, withPremium), LanguageCode: string(info.Code)}); err != nil {
 			log.Warn("set command menu failed", "language", info.Code, "error", err)
 		}
 	}
@@ -252,7 +259,7 @@ func SetCommandMenus(ctx context.Context, b *bot.Bot, log *slog.Logger) {
 
 func (h *handler) setChatCommands(ctx context.Context, chatID int64, lang i18n.Lang) {
 	if _, err := h.b.SetMyCommands(ctx, &bot.SetMyCommandsParams{
-		Commands: commandMenu(lang),
+		Commands: commandMenu(lang, h.premiumEnabled()),
 		Scope:    &models.BotCommandScopeChat{ChatID: chatID},
 	}); err != nil {
 		h.log.Warn("set chat command menu failed", "chat_id", chatID, "error", err)

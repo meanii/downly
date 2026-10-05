@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-telegram/bot"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/meanii/downly/internal/config"
@@ -50,6 +51,10 @@ type Worker struct {
 
 	// HeartbeatInterval defaults to 30s; tests shorten it.
 	HeartbeatInterval time.Duration
+
+	// AfterJob, if set, is called once a job's processing has fully ended
+	// (all messages sent, files removed). Used by tests.
+	AfterJob func(jobID int64)
 }
 
 func (w *Worker) seen() {
@@ -123,6 +128,9 @@ func sleep(ctx context.Context, d time.Duration, wake <-chan struct{}) {
 func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *db.Job) {
 	log := workerLog.With("job_id", job.ID, "chat_id", job.ChatID, "url", job.URL, "mode", job.Mode, "quality", job.Quality)
 	log.Info("job claimed", "retry_count", job.RetryCount)
+	if w.AfterJob != nil {
+		defer w.AfterJob(job.ID)
+	}
 	workDir := w.Cfg.Downly.Worker.WorkDir
 	defer func() { _ = os.RemoveAll(jobDir(workDir, job.ID)) }()
 
@@ -144,6 +152,9 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 		},
 	)
 	progress.quiet = isGroupChat(job.ChatID)
+	if w.serveCached(runCtx, workCtx, log, job, lang) {
+		return
+	}
 	progress.Force(job.ProgressText, job.ProgressPercent)
 
 	dlCtx, cancelDL := context.WithTimeout(runCtx, w.jobTimeout())
@@ -197,10 +208,11 @@ func (w *Worker) process(workCtx context.Context, workerLog *slog.Logger, job *d
 
 	fctx, cancel := w.finalizeCtx(workCtx)
 	defer cancel()
+	// Cache first: once the job reads as done, a repeat request must hit.
+	w.remember(fctx, log, job, items, meta)
 	if err := db.MarkDone(fctx, w.Pool, job.ID, res.FilePath, res.FileName, res.Platform, size); err != nil {
 		log.Error("mark done failed", "error", err)
 	}
-	w.remember(fctx, log, job, items, meta)
 	w.finishInline(fctx, log, job, lang, items, meta)
 	if isGroupChat(job.ChatID) {
 		// The media itself answers the link; the status message is clutter.
@@ -393,6 +405,43 @@ func (w *Worker) deleteStatus(ctx context.Context, log *slog.Logger, job *db.Job
 	if err := w.Msg.Delete(ctx, job.ChatID, int(job.TelegramMsgID)); err != nil {
 		log.Warn("delete status message failed", "error", err)
 	}
+}
+
+// serveCached delivers a job straight from the media cache when the same
+// content was sent before (jobs from subscriptions, retries or other
+// instances reach here without the handler's cache check). It reports
+// whether the job is finished.
+func (w *Worker) serveCached(runCtx, workCtx context.Context, log *slog.Logger, job *db.Job, lang i18n.Lang) bool {
+	if job.CacheKey == "" || w.Cfg.Downly.Cache.Disabled {
+		return false
+	}
+	e, ok, err := db.GetCache(runCtx, w.Pool, job.CacheKey)
+	if err != nil || !ok {
+		return false
+	}
+	caption := Caption(lang, e.Meta)
+	if err := w.Msg.SendCached(runCtx, job.ChatID, e.Items, e.Meta, SendOptions{Caption: caption, ReplyTo: int(job.ReplyTo)}); err != nil {
+		log.Warn("cached delivery failed, downloading instead", "error", err)
+		if errors.Is(err, bot.ErrorBadRequest) {
+			_ = db.DeleteCache(runCtx, w.Pool, e.Key)
+		}
+		return false
+	}
+	fctx, cancel := w.finalizeCtx(workCtx)
+	defer cancel()
+	_ = db.TouchCache(fctx, w.Pool, e.Key)
+	if err := db.MarkDone(fctx, w.Pool, job.ID, "", e.Title, e.Platform, e.SizeBytes); err != nil {
+		log.Error("mark done failed", "error", err)
+	}
+	w.finishInline(fctx, log, job, lang, e.Items, e.Meta)
+	if isGroupChat(job.ChatID) {
+		w.deleteStatus(fctx, log, job)
+	} else {
+		w.editFinal(fctx, job, formatDoneMessage(lang, job.ID, &downloader.Result{Platform: e.Platform, Title: e.Title}))
+	}
+	w.count("done")
+	log.Info("job served from cache")
+	return true
 }
 
 // remember stores the uploaded file IDs so the same request is served

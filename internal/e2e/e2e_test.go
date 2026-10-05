@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/meanii/downly/internal/db"
 	"github.com/meanii/downly/internal/dbtest"
 	"github.com/meanii/downly/internal/downloader"
+	"github.com/meanii/downly/internal/subscriptions"
 	tg "github.com/meanii/downly/internal/telegram"
 	"github.com/meanii/downly/internal/tgtest"
 	"github.com/meanii/downly/internal/worker"
@@ -32,7 +34,7 @@ import (
 const fakeYTDLP = `#!/usr/bin/env bash
 set -u
 echo "$*" >> "$(dirname "$0")/calls.log"
-out=""; audio=0; url=""; after_dd=0; dump=0; yes_playlist=0
+out=""; audio=0; url=""; after_dd=0; dump=0; yes_playlist=0; flat=0
 while [ $# -gt 0 ]; do
   if [ $after_dd = 1 ]; then url="$1"; shift; continue; fi
   case "$1" in
@@ -41,6 +43,7 @@ while [ $# -gt 0 ]; do
     -x) audio=1 ;;
     --dump-single-json) dump=1 ;;
     --yes-playlist) yes_playlist=1 ;;
+    --flat-playlist) flat=1 ;;
   esac
   shift
 done
@@ -49,6 +52,11 @@ case "$url" in
   *private*) echo "ERROR: [youtube] vid42: Private video. Sign in if you've been granted access" >&2; exit 1 ;;
   *unsupported*) echo "ERROR: Unsupported URL: $url" >&2; exit 1 ;;
 esac
+# Channel/playlist listings come from feed.json, which tests rewrite.
+if [ $flat = 1 ]; then
+  cat "$(dirname "$0")/feed.json" 2>/dev/null || { echo "ERROR: no feed" >&2; exit 1; }
+  exit 0
+fi
 if [ $dump = 1 ]; then
   printf '%s\n' '{"extractor_key":"Youtube","title":"E2E Видео","id":"vid42","duration":65}'
   exit 0
@@ -95,6 +103,10 @@ type env struct {
 	pool    *pgxpool.Pool
 	workDir string
 	binDir  string
+	poller  *subscriptions.Poller
+
+	mu        sync.Mutex
+	processed map[int64]bool // jobs the worker has completely finished
 }
 
 func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
@@ -137,31 +149,40 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 	controller := worker.NewController()
 	tg.RegisterHandlers(logger, cfg, controller, b, pool)
 
+	e := &env{t: t, processed: map[int64]bool{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	waker := worker.NewWaker()
 	go worker.Listen(ctx, logger, pool, waker)
+	dl := downloader.YTDLP{
+		Bin:           bin,
+		MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
+		// The literal-IP test host stands in for an album site.
+		AlbumHosts: []string{"1.1.1.1"},
+		FFmpegBin:  ffmpeg,
+		Logger:     logger,
+	}
 	w := &worker.Worker{
-		ID:   "e2e-1",
-		Cfg:  cfg,
-		Pool: pool,
-		DL: downloader.YTDLP{
-			Bin:           bin,
-			MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
-			// The literal-IP test host stands in for an album site.
-			AlbumHosts: []string{"1.1.1.1"},
-			FFmpegBin:  ffmpeg,
-			Logger:     logger,
-		},
+		ID:         "e2e-1",
+		Cfg:        cfg,
+		Pool:       pool,
+		DL:         dl,
 		Msg:        worker.TelegramMessenger{Bot: b},
 		Controller: controller,
-		Waker:      waker,
-		Log:        logger,
+		AfterJob: func(id int64) {
+			e.mu.Lock()
+			e.processed[id] = true
+			e.mu.Unlock()
+		},
+		Waker: waker,
+		Log:   logger,
 	}
 	done := make(chan struct{})
 	go func() { w.Run(ctx, ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	return &env{t: t, api: api, b: b, pool: pool, workDir: workDir, binDir: filepath.Dir(bin)}
+	poller := &subscriptions.Poller{Pool: pool, Fetcher: dl, Interval: time.Hour, Log: logger}
+	e.api, e.b, e.pool, e.workDir, e.binDir, e.poller = api, b, pool, workDir, filepath.Dir(bin), poller
+	return e
 }
 
 // ytdlpCalls returns the argument lists of yt-dlp download calls.
@@ -235,7 +256,14 @@ func (e *env) waitJob(userID int64) db.Job {
 		if len(jobs) == 1 {
 			switch jobs[0].Status {
 			case db.StatusDone, db.StatusFailed, db.StatusCanceled:
-				return jobs[0]
+				// Cache hits finish in the handler; worker jobs must also have
+				// sent their final messages.
+				e.mu.Lock()
+				done := jobs[0].Cached || e.processed[jobs[0].ID]
+				e.mu.Unlock()
+				if done {
+					return jobs[0]
+				}
 			}
 		}
 		select {

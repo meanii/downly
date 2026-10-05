@@ -61,7 +61,11 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	}
 	h.commands = h.commandTable()
 
-	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypeContains, h.onMessage)
+	// Only messages with text: service messages (payments, joins) have none
+	// and need their own handlers below.
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.Text != ""
+	}, h.onMessage)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "dl:")
 	}, h.onQualityCallback)
@@ -78,6 +82,16 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
 		return u.CallbackQuery != nil && u.CallbackQuery.Data == "noop"
 	}, h.onNoopCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && strings.HasPrefix(u.CallbackQuery.Data, "unf:")
+	}, h.onUnfollowCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.CallbackQuery != nil && u.CallbackQuery.Data == "buy:premium"
+	}, h.onBuyCallback)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.PreCheckoutQuery != nil }, h.onPreCheckout)
+	b.RegisterHandlerMatchFunc(func(u *models.Update) bool {
+		return u.Message != nil && u.Message.SuccessfulPayment != nil
+	}, h.onSuccessfulPayment)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.InlineQuery != nil }, h.onInlineQuery)
 	b.RegisterHandlerMatchFunc(func(u *models.Update) bool { return u.ChosenInlineResult != nil }, h.onChosenInlineResult)
 }
@@ -284,9 +298,14 @@ func (h *handler) preferredQuality(ctx context.Context, userID int64) string {
 	return ""
 }
 
-func (h *handler) limitsFor(userID int64) db.EnqueueLimits {
+func (h *handler) limitsFor(ctx context.Context, userID int64) db.EnqueueLimits {
 	lim := db.EnqueueLimits{MaxQueued: h.cfg.Downly.Limits.MaxQueuedPerUser}
-	if !isAdmin(h.cfg, userID) {
+	switch {
+	case isAdmin(h.cfg, userID):
+	case h.isPremium(ctx, userID):
+		lim.MaxQueued = max(lim.MaxQueued, h.cfg.Downly.Premium.MaxQueued)
+		lim.DailyQuota = h.cfg.Downly.Premium.DailyQuota // 0 = unlimited
+	default:
 		lim.DailyQuota = h.cfg.Downly.Limits.DailyQuotaPerUser
 	}
 	return lim
