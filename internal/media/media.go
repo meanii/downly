@@ -119,6 +119,38 @@ func CanonicalURL(raw string) string {
 	return u.String()
 }
 
+// hostPlatforms maps hosts whose name differs from yt-dlp's extractor name.
+var hostPlatforms = map[string]string{
+	"youtu.be": "youtube", "x.com": "twitter", "fb.watch": "facebook",
+	"threads.net": "threads", "threads.com": "threads", "bsky.app": "bluesky",
+}
+
+// PlatformFromURL guesses the platform name (matching yt-dlp's lowercased
+// extractor names, e.g. "instagram") from a link's host. Used when a
+// download fails before yt-dlp reports the extractor.
+func PlatformFromURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, p := range []string{"www.", "m.", "mobile.", "vm.", "vt."} {
+		host = strings.TrimPrefix(host, p)
+	}
+	if p, ok := hostPlatforms[host]; ok {
+		return p
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return ""
+	}
+	// IP literals have no meaningful name.
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		return ""
+	}
+	return labels[len(labels)-2]
+}
+
 // CacheKey identifies a download: the same content in the same mode,
 // quality and variant (e.g. clip range) maps to the same key.
 func CacheKey(rawURL, mode, quality, variant string) string {

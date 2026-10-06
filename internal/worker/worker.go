@@ -304,7 +304,14 @@ func (w *Worker) handleInterrupted(workCtx, runCtx context.Context, log *slog.Lo
 func (w *Worker) fail(workCtx context.Context, log *slog.Logger, job *db.Job, lang i18n.Lang, err error, permanent bool) {
 	fctx, cancel := w.finalizeCtx(workCtx)
 	defer cancel()
+	if dbErr := db.SetPlatformIfEmpty(fctx, w.Pool, job.ID, media.PlatformFromURL(job.URL)); dbErr != nil {
+		log.Warn("record platform failed", "error", dbErr)
+	}
 	userMsg := friendlyError(err)
+	if downloader.IsCrash(err) {
+		// A Python traceback means nothing to users.
+		userMsg = i18n.T(lang, "error_internal")
+	}
 	if !permanent && job.RetryCount < w.Cfg.Downly.Limits.MaxRetries {
 		delay := retryDelay(job.RetryCount)
 		log.Warn("download failed, scheduling retry", "error", err, "retry_count", job.RetryCount+1, "delay", delay.String())

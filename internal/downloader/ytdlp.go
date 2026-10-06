@@ -121,10 +121,8 @@ func (y YTDLP) command(ctx context.Context, args []string, url string) *exec.Cmd
 
 func (y YTDLP) buildArgs(args []string, url string) []string {
 	out := append([]string{}, args...)
-	if y.CookiesFile != "" {
-		if _, err := os.Stat(y.CookiesFile); err == nil {
-			out = append(out, "--cookies", y.CookiesFile)
-		}
+	if c := y.cookieCopy(); c != "" {
+		out = append(out, "--cookies", c)
 	}
 	return append(out, "--", url)
 }
@@ -238,9 +236,10 @@ func (y YTDLP) Download(ctx context.Context, workDir string, jobID int64, url st
 	if err == nil {
 		return result, nil
 	}
-	// The media exists but can't be accessed: the fallbacks below would only
-	// replace this clear reason with a vague "no image found".
-	if IsUnavailable(err) {
+	// The media exists but can't be accessed, or yt-dlp itself crashed: the
+	// fallbacks below would only replace the real reason with a vague
+	// "no image found".
+	if IsUnavailable(err) || IsCrash(err) {
 		return nil, err
 	}
 
@@ -508,6 +507,13 @@ var unavailableMarkers = []string{
 	"copyright",
 	"file is larger than max-filesize",
 	"requested content is not available",
+}
+
+// IsCrash reports whether yt-dlp died with an internal error (a Python
+// traceback) rather than reporting a problem with the media. Such failures
+// are worth retrying and must not be masked by fallbacks.
+func IsCrash(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Traceback (most recent call last)")
 }
 
 // IsUnavailable reports whether err says the media can't be accessed
