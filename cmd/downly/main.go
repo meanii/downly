@@ -68,10 +68,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	for _, w := range cfg.Warnings() {
+		logger.Warn("config", "warning", w)
+	}
+
 	// No overall client Timeout: it would also cap file uploads, which can
 	// legitimately take minutes. Calls are bounded by their contexts instead,
 	// and ResponseHeaderTimeout catches a stalled server. It must exceed the
 	// long-poll duration below.
+	headerTimeout := 90 * time.Second
+	if cfg.UsesLocalAPI() {
+		// A local server answers an upload only after relaying the whole file
+		// (up to 2GB) to Telegram, so the response can take many minutes.
+		headerTimeout = 65 * time.Minute
+	}
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
@@ -85,7 +95,7 @@ func main() {
 			TLSHandshakeTimeout:   15 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			MaxIdleConnsPerHost:   10,
-			ResponseHeaderTimeout: 90 * time.Second,
+			ResponseHeaderTimeout: headerTimeout,
 		},
 	}
 

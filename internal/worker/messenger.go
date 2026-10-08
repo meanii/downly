@@ -223,13 +223,11 @@ func (m TelegramMessenger) EditInlineText(ctx context.Context, inlineMessageID, 
 	return err
 }
 
-// uploadTimeout scales with file size, assuming a pessimistic 256 KiB/s uplink.
+// uploadTimeout scales with file size, assuming a pessimistic 256 KiB/s
+// uplink, capped at an hour (2GB files via a local Bot API).
 func uploadTimeout(size int64) time.Duration {
 	d := 2*time.Minute + time.Duration(size/(256*1024))*time.Second
-	if d > 30*time.Minute {
-		d = 30 * time.Minute
-	}
-	return d
+	return min(d, 60*time.Minute)
 }
 
 // uploadAttempts and uploadBackoff bound in-place upload retries before the

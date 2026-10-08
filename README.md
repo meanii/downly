@@ -230,13 +230,28 @@ The image includes yt-dlp, ffmpeg and [Deno](https://github.com/yt-dlp/yt-dlp/wi
 
 It runs as uid 10001, so `config.yaml` must be readable by that user (e.g. `chmod 644 config.yaml`), or you can pass secrets through the environment variables above.
 
-## Larger files
+## Larger files (up to 2GB)
 
-The public Bot API caps uploads at 50MB. To send files up to 2GB:
+The public Bot API caps uploads at 50MB. With a self-hosted [Bot API server](https://github.com/tdlib/telegram-bot-api) the limit is 2000MB. `compose.yaml` includes one under the `local-api` profile.
 
-1. Run a [local Bot API server](https://github.com/tdlib/telegram-bot-api).
-2. Point `downly.telegram.api_url` at it, e.g. `http://telegram-bot-api:8081`.
-3. Raise `max_file_size_mb`.
+1. Get an API ID and hash at https://my.telegram.org (API development tools).
+2. Put them in `.env` next to `compose.yaml`:
+   ```
+   COMPOSE_PROFILES=local-api
+   TELEGRAM_API_ID=123456
+   TELEGRAM_API_HASH=abcdef...
+   DOWNLY_API_URL=http://telegram-bot-api:8081
+   ```
+3. Stop the bot, then log it out of the cloud API **once** (required before moving a bot to a local server; it can't log in to the cloud again for 10 minutes):
+   ```
+   docker compose stop downly
+   curl https://api.telegram.org/bot<TOKEN>/logOut
+   ```
+4. `docker compose up -d`
+
+When `api_url` is set, `max_file_size_mb` defaults to 1900 and `max_download_size_mb` to 3800 (larger sources are compressed to fit). If `max_file_size_mb` is above 50 without `api_url`, the bot logs a warning at startup.
+
+Budget disk space for big jobs: each worker can hold one source file plus its compressed copy in the work dir, and the Bot API server keeps a temporary copy while relaying.
 
 ## Instagram cookies
 
