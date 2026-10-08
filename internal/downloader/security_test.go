@@ -28,9 +28,17 @@ func TestBuildArgsCookiesBeforeDoubleDash(t *testing.T) {
 		t.Fatal(err)
 	}
 	y := YTDLP{Bin: "yt-dlp", CookiesFile: cookies}
-	args := strings.Join(y.buildArgs([]string{"--ignore-config"}, "https://x.com/a"), " ")
-	if !strings.Contains(args, "--cookies "+cookies+" -- https://x.com/a") {
-		t.Fatalf("unexpected args: %s", args)
+	args := y.buildArgs([]string{"--ignore-config"}, "https://x.com/a")
+	n := len(args)
+	if n < 4 || args[n-4] != "--cookies" || args[n-2] != "--" || args[n-1] != "https://x.com/a" {
+		t.Fatalf("unexpected args: %v", args)
+	}
+	// yt-dlp gets a copy, never the original (which may be read-only).
+	if args[n-3] == cookies {
+		t.Fatal("original cookies file passed to yt-dlp")
+	}
+	if data, err := os.ReadFile(args[n-3]); err != nil || string(data) != "#" {
+		t.Fatalf("cookie copy = %q, %v", data, err)
 	}
 }
 

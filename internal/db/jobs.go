@@ -220,6 +220,16 @@ func RequeueJob(ctx context.Context, pool *pgxpool.Pool, jobID int64, reason str
 	`, jobID, StatusPending, reason, StatusProcessing))
 }
 
+// SetPlatformIfEmpty records a job's platform unless one is already known,
+// so failed downloads count in per-platform health stats.
+func SetPlatformIfEmpty(ctx context.Context, pool *pgxpool.Pool, jobID int64, platform string) error {
+	if platform == "" {
+		return nil
+	}
+	_, err := pool.Exec(ctx, `update download_jobs set platform = $2 where id = $1 and platform = ''`, jobID, platform)
+	return err
+}
+
 func MarkFailed(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg string) error {
 	return expectProcessing(pool.Exec(ctx, `
 		update download_jobs

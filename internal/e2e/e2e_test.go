@@ -34,12 +34,13 @@ import (
 const fakeYTDLP = `#!/usr/bin/env bash
 set -u
 echo "$*" >> "$(dirname "$0")/calls.log"
-out=""; audio=0; url=""; after_dd=0; dump=0; yes_playlist=0; flat=0
+out=""; audio=0; url=""; after_dd=0; dump=0; yes_playlist=0; flat=0; cookies=""
 while [ $# -gt 0 ]; do
   if [ $after_dd = 1 ]; then url="$1"; shift; continue; fi
   case "$1" in
     --) after_dd=1 ;;
     -o) out="$2"; shift ;;
+    --cookies) cookies="$2"; shift ;;
     -x) audio=1 ;;
     --dump-single-json) dump=1 ;;
     --yes-playlist) yes_playlist=1 ;;
@@ -48,6 +49,17 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ -z "$url" ]; then echo "ERROR: URL must come after --" >&2; exit 2; fi
+crash() {
+  echo "Traceback (most recent call last):" >&2
+  echo "  File \"yt_dlp/cookies.py\", line 1305, in open" >&2
+  echo "OSError: [Errno 30] $1" >&2
+  exit 1
+}
+# Like real yt-dlp, write the cookie jar back; a read-only file crashes it.
+if [ -n "$cookies" ]; then
+  printf '# saved\n' >> "$cookies" 2>/dev/null || crash "Read-only file system: '$cookies'"
+fi
+case "$url" in *crash*) crash "simulated" ;; esac
 case "$url" in
   *private*) echo "ERROR: [youtube] vid42: Private video. Sign in if you've been granted access" >&2; exit 1 ;;
   *unsupported*) echo "ERROR: Unsupported URL: $url" >&2; exit 1 ;;
@@ -155,6 +167,7 @@ func newEnv(t *testing.T, opts ...func(*config.Root)) *env {
 	go worker.Listen(ctx, logger, pool, waker)
 	dl := downloader.YTDLP{
 		Bin:           bin,
+		CookiesFile:   cfg.Downly.Services.YTDLP.CookiesFile,
 		MaxFileSizeMB: cfg.Downly.Worker.MaxFileSizeMB,
 		// The literal-IP test host stands in for an album site.
 		AlbumHosts: []string{"1.1.1.1"},

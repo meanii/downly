@@ -180,6 +180,7 @@ var catalog = map[Lang]map[string]string{
 		"paysupport":              "For help with a payment, reply here describing the issue and an admin will get back to you. Refunds are possible for purchases that didn't work as described.",
 		"cmd_premium":             "Premium: more downloads",
 		"cmd_paysupport":          "Help with payments",
+		"error_internal":          "the downloader hit an internal error",
 	},
 
 	RU: {
@@ -350,6 +351,7 @@ var catalog = map[Lang]map[string]string{
 		"paysupport":              "Если нужна помощь с оплатой, опишите проблему в ответ на это сообщение — администратор свяжется с вами. Возврат возможен, если покупка не работает как описано.",
 		"cmd_premium":             "Премиум: больше загрузок",
 		"cmd_paysupport":          "Помощь с оплатой",
+		"error_internal":          "внутренняя ошибка загрузчика",
 	},
 
 	HI: {
@@ -520,6 +522,7 @@ var catalog = map[Lang]map[string]string{
 		"paysupport":              "भुगतान में सहायता के लिए, यहाँ जवाब में समस्या बताएँ, एक एडमिन आपसे संपर्क करेगा। जो खरीदारी बताए अनुसार काम न करे, उसका रिफ़ंड संभव है।",
 		"cmd_premium":             "प्रीमियम: ज़्यादा डाउनलोड",
 		"cmd_paysupport":          "भुगतान में सहायता",
+		"error_internal":          "डाउनलोडर में आंतरिक त्रुटि हुई",
 	},
 
 	FA: {
@@ -690,5 +693,6 @@ var catalog = map[Lang]map[string]string{
 		"paysupport":              "برای کمک در پرداخت، در پاسخ به همین پیام مشکل را شرح دهید تا مدیر با شما تماس بگیرد. برای خریدهایی که طبق توضیحات کار نکنند، بازپرداخت ممکن است.",
 		"cmd_premium":             "پریمیوم: دانلود بیشتر",
 		"cmd_paysupport":          "کمک در پرداخت",
+		"error_internal":          "خطای داخلی در دانلودکننده رخ داد",
 	},
 }
