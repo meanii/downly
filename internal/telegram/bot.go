@@ -98,10 +98,17 @@ func RegisterHandlers(logger *slog.Logger, cfg *config.Root, controller *worker.
 
 func (h *handler) onMessage(ctx context.Context, b *bot.Bot, update *models.Update) {
 	msg := update.Message
-	if msg == nil || msg.Text == "" || msg.From == nil || msg.From.IsBot {
+	if msg == nil || msg.From == nil || msg.From.IsBot {
 		return
 	}
 	text := strings.TrimSpace(msg.Text)
+	if text == "" && msg.Document != nil && strings.HasPrefix(strings.TrimSpace(msg.Caption), "/") {
+		// A command sent as a file's caption, e.g. /cookies on a cookies.txt.
+		text = strings.TrimSpace(msg.Caption)
+	}
+	if text == "" {
+		return
+	}
 
 	if strings.HasPrefix(text, "/") {
 		name, args, ok := parseCommand(text, getBotUsername(ctx, b))

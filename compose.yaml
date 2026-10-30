@@ -19,7 +19,9 @@ services:
       # The container runs as uid 10001: config.yaml must be readable by it
       # (e.g. chmod 644), or provide secrets via the variables above.
       - ./config.yaml:/app/config.yaml:ro
-      - ./cookies:/app/cookies:ro
+      # Writable so an admin can replace the file with /cookies; chown the
+      # directory to uid 10001. yt-dlp itself only ever gets private copies.
+      - ./cookies:/app/cookies
       - downly-tmp:/app/tmp
     restart: unless-stopped
     # Must exceed worker.shutdown_grace_seconds so running jobs can finish

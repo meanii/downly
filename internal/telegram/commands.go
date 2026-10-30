@@ -51,6 +51,7 @@ func (h *handler) commandTable() map[string]commandFunc {
 		"ban":       h.cmdBan,
 		"unban":     h.cmdUnban,
 		"refund":    h.cmdRefund,
+		"cookies":   h.cmdCookies,
 	}
 	for name, fn := range admin {
 		user[name] = h.adminOnly(fn)
@@ -91,7 +92,8 @@ const adminHelp = "Admin commands:\n" +
 	"/promote, /demote <job_id> - change priority\n" +
 	"/broadcast <msg> - message all users\n" +
 	"/ban, /unban <user_id> - block/unblock user\n" +
-	"/refund <charge_id> - refund a Stars payment"
+	"/refund <charge_id> - refund a Stars payment\n" +
+	"/cookies - replace the yt-dlp cookies file (send cookies.txt with this caption)"
 
 func (h *handler) helpText(ctx context.Context, lang i18n.Lang, userID int64) string {
 	text := i18n.T(lang, "start", getBotUsername(ctx, h.b))
