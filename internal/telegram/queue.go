@@ -44,6 +44,10 @@ func (h *handler) enqueue(ctx context.Context, d download) (int64, error) {
 		h.replyTo(ctx, d.chatID, d.replyTo, i18n.T(d.lang, "url_unsupported"))
 		return 0, safeurl.ErrInvalidURL
 	}
+	if isPrivateTelegramLink(d.url) {
+		h.replyTo(ctx, d.chatID, d.replyTo, i18n.T(d.lang, "url_private_tg"))
+		return 0, safeurl.ErrInvalidURL
+	}
 	cleanURL, mode, quality := jobSpec(d.url)
 	if d.gif {
 		mode, quality = db.ModeGIF, ""

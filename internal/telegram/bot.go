@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -414,6 +415,19 @@ func isQueueableURL(raw string) bool {
 	clean, _ := stripModePrefix(raw)
 	_, err := safeurl.Validate(clean)
 	return err == nil
+}
+
+// isPrivateTelegramLink reports whether raw points into a private Telegram
+// channel (t.me/c/<id>/<msg>). yt-dlp can never fetch those, so they are
+// refused up front with a clear reason instead of a generic failure.
+func isPrivateTelegramLink(raw string) bool {
+	clean, _ := stripModePrefix(raw)
+	u, err := url.Parse(clean)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	return (host == "t.me" || host == "telegram.me") && strings.HasPrefix(u.Path, "/c/")
 }
 
 func isPreferenceValue(q string) bool {

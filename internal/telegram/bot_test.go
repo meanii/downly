@@ -203,3 +203,28 @@ func TestStripModePrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestIsPrivateTelegramLink(t *testing.T) {
+	private := []string{
+		"https://t.me/c/1281294627/228550",
+		"http://www.telegram.me/c/123/4",
+		"q720:https://t.me/c/123/4",
+	}
+	public := []string{
+		"https://t.me/durov/1",
+		"https://t.me/joinchat/abc",
+		"https://example.com/c/1/2",
+		"https://t.me/",
+		"not a url",
+	}
+	for _, u := range private {
+		if !isPrivateTelegramLink(u) {
+			t.Errorf("should be private: %s", u)
+		}
+	}
+	for _, u := range public {
+		if isPrivateTelegramLink(u) {
+			t.Errorf("should not be private: %s", u)
+		}
+	}
+}
