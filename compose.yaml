@@ -12,6 +12,9 @@ services:
       - DOWNLY_BOT_TOKEN
       - DOWNLY_POSTGRES_URL
       - DOWNLY_ADMIN_IDS
+      # Set to http://telegram-bot-api:8081 (with the local-api profile)
+      # to send files up to 2GB.
+      - DOWNLY_API_URL
     volumes:
       # The container runs as uid 10001: config.yaml must be readable by it
       # (e.g. chmod 644), or provide secrets via the variables above.
@@ -49,5 +52,20 @@ services:
       timeout: 5s
       retries: 10
 
+  # Self-hosted Bot API server: lifts the upload limit from 50MB to 2GB.
+  # Enable with COMPOSE_PROFILES=local-api and TELEGRAM_API_ID/HASH (from
+  # https://my.telegram.org) in .env, plus DOWNLY_API_URL above. Before the
+  # first switch the bot must be logged out of the cloud API once; see README.
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    profiles: ["local-api"]
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+    restart: unless-stopped
+
 volumes:
   downly-tmp: {}
+  telegram-bot-api-data: {}
