@@ -75,6 +75,7 @@ Admin commands (English only):
 - `/ban <user_id> [reason]` - block a user
 - `/unban <user_id>` - unblock a user
 - `/refund <charge_id>` - refund a Telegram Stars payment
+- `/cookies` - replace the yt-dlp cookies file: send a Netscape `cookies.txt` with `/cookies` as its caption (or reply `/cookies` to one)
 
 ## Features
 
@@ -265,3 +266,5 @@ downly:
 ```
 
 A template is at `cookies/instagram.txt.sample`.
+
+When a login expires, an admin can send the bot a fresh `cookies.txt` (exported from a logged-in browser) with the caption `/cookies`; the bot validates it and replaces the file. For that the `cookies/` directory must be writable by the container user: `chown -R 10001 cookies`.
