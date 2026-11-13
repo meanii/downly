@@ -3,7 +3,7 @@ module github.com/meanii/downly
 go 1.27
 
 require (
-	github.com/go-telegram/bot v1.27.0
+	github.com/go-telegram/bot v1.28.0
 	github.com/jackc/pgx/v5 v5.11.0
 	gopkg.in/yaml.v3 v3.0.1
 )
